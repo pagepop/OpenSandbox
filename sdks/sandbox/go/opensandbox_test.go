@@ -2664,3 +2664,305 @@ func TestCreateSandbox_WithVolumes(t *testing.T) {
 	})
 	require.NoErrorf(t, err, "CreateSandbox with Volumes")
 }
+
+type testTraceSpan struct {
+	tags   []map[string]any
+	output any
+	err    error
+}
+
+func (s *testTraceSpan) SetTags(_ context.Context, tags map[string]any) {
+	s.tags = append(s.tags, tags)
+}
+
+func (s *testTraceSpan) SetOutput(_ context.Context, output any) {
+	s.output = output
+}
+
+func (s *testTraceSpan) SetError(_ context.Context, err error) {
+	s.err = err
+}
+
+type testTraceCall struct {
+	name string
+	tags map[string]any
+	span *testTraceSpan
+	err  error
+}
+
+func captureTraceCalls(t *testing.T) func() []testTraceCall {
+	t.Helper()
+
+	var mu sync.Mutex
+	var calls []testTraceCall
+	SetTraceHook(func(ctx context.Context, spanName string, tags map[string]any, fn func(context.Context, TraceSpan) error) error {
+		span := &testTraceSpan{}
+		err := fn(ctx, span)
+		mu.Lock()
+		calls = append(calls, testTraceCall{name: spanName, tags: tags, span: span, err: err})
+		mu.Unlock()
+		return err
+	})
+	t.Cleanup(func() { SetTraceHook(nil) })
+
+	return func() []testTraceCall {
+		mu.Lock()
+		defer mu.Unlock()
+		return append([]testTraceCall(nil), calls...)
+	}
+}
+
+func TestTraceHook_CreateSandboxRecordsRequestAndStatus(t *testing.T) {
+	var mu sync.Mutex
+	var calls []testTraceCall
+	SetTraceHook(func(ctx context.Context, spanName string, tags map[string]any, fn func(context.Context, TraceSpan) error) error {
+		span := &testTraceSpan{}
+		err := fn(ctx, span)
+		mu.Lock()
+		calls = append(calls, testTraceCall{name: spanName, tags: tags, span: span, err: err})
+		mu.Unlock()
+		return err
+	})
+	t.Cleanup(func() { SetTraceHook(nil) })
+
+	_, client := newLifecycleServer(t, func(w http.ResponseWriter, r *http.Request) {
+		jsonResponse(w, http.StatusCreated, SandboxInfo{
+			ID:        "sbx-trace",
+			Status:    SandboxStatus{State: StatePending},
+			CreatedAt: time.Now().UTC().Truncate(time.Second),
+		})
+	})
+
+	_, err := client.CreateSandbox(context.Background(), CreateSandboxRequest{
+		Image:          &ImageSpec{URI: "python:3.12"},
+		Entrypoint:     []string{"/bin/sh"},
+		ResourceLimits: ResourceLimits{"cpu": "500m"},
+	})
+	require.NoErrorf(t, err, "CreateSandbox")
+
+	require.Len(t, calls, 1)
+	call := calls[0]
+	if call.name != "opensandbox_http_request" {
+		assert.Fail(t, fmt.Sprintf("trace name = %q, want opensandbox_http_request", call.name))
+	}
+	if call.tags["method"] != http.MethodPost || call.tags["path"] != "/sandboxes" {
+		assert.Fail(t, fmt.Sprintf("trace tags = %#v, want POST /sandboxes", call.tags))
+	}
+	output, ok := call.span.output.(map[string]any)
+	require.True(t, ok, "trace output = %T, want map[string]any", call.span.output)
+	if output["status_code"] != http.StatusCreated {
+		assert.Fail(t, fmt.Sprintf("status_code = %#v, want %d", output["status_code"], http.StatusCreated))
+	}
+	require.NoErrorf(t, call.err, "trace wrapped function")
+	require.NoErrorf(t, call.span.err, "trace span error")
+}
+
+func TestTraceHook_RawExecdRequestsRecordRequestAndStatus(t *testing.T) {
+	tests := []struct {
+		name       string
+		wantMethod string
+		wantPath   string
+		wantStatus int
+		handler    http.HandlerFunc
+		run        func(context.Context, *ExecdClient) error
+	}{
+		{
+			name:       "command logs",
+			wantMethod: http.MethodGet,
+			wantPath:   "/command/cmd-trace/logs",
+			wantStatus: http.StatusOK,
+			handler: func(w http.ResponseWriter, r *http.Request) {
+				require.Equal(t, "/command/cmd-trace/logs", r.URL.Path)
+				w.Header().Set("EXECD-COMMANDS-TAIL-CURSOR", "7")
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte("trace log\n"))
+			},
+			run: func(ctx context.Context, client *ExecdClient) error {
+				resp, err := client.GetCommandLogs(ctx, "cmd-trace", nil)
+				if err != nil {
+					return err
+				}
+				require.Equal(t, "trace log\n", resp.Output)
+				require.Equal(t, int64(7), resp.Cursor)
+				return nil
+			},
+		},
+		{
+			name:       "upload files",
+			wantMethod: http.MethodPost,
+			wantPath:   "/files/upload",
+			wantStatus: http.StatusNoContent,
+			handler: func(w http.ResponseWriter, r *http.Request) {
+				require.Equal(t, "/files/upload", r.URL.Path)
+				require.NoError(t, r.ParseMultipartForm(1<<20))
+				w.WriteHeader(http.StatusNoContent)
+			},
+			run: func(ctx context.Context, client *ExecdClient) error {
+				return client.UploadFiles(ctx, []UploadFileEntry{{
+					File: strings.NewReader("trace upload"),
+					Options: UploadFileOptions{
+						FileName: "trace.txt",
+						Metadata: FileMetadata{Path: "/sandbox/trace.txt"},
+					},
+				}})
+			},
+		},
+		{
+			name:       "download file",
+			wantMethod: http.MethodGet,
+			wantPath:   "/files/download?path=%2Fsandbox%2Ftrace.txt",
+			wantStatus: http.StatusOK,
+			handler: func(w http.ResponseWriter, r *http.Request) {
+				require.Equal(t, "/files/download", r.URL.Path)
+				require.Equal(t, "/sandbox/trace.txt", r.URL.Query().Get("path"))
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte("trace download"))
+			},
+			run: func(ctx context.Context, client *ExecdClient) error {
+				rc, err := client.DownloadFile(ctx, "/sandbox/trace.txt", "")
+				if err != nil {
+					return err
+				}
+				defer rc.Close()
+				data, err := io.ReadAll(rc)
+				if err != nil {
+					return err
+				}
+				require.Equal(t, "trace download", string(data))
+				return nil
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			getCalls := captureTraceCalls(t)
+			_, client := newExecdServer(t, tc.handler)
+
+			err := tc.run(context.Background(), client)
+			require.NoErrorf(t, err, tc.name)
+
+			calls := getCalls()
+			require.Len(t, calls, 1)
+			call := calls[0]
+			require.Equal(t, "opensandbox_http_request", call.name)
+			require.Equal(t, tc.wantMethod, call.tags["method"])
+			require.Equal(t, tc.wantPath, call.tags["path"])
+			output, ok := call.span.output.(map[string]any)
+			require.True(t, ok, "trace output = %T, want map[string]any", call.span.output)
+			require.Equal(t, tc.wantStatus, output["status_code"])
+			require.NoErrorf(t, call.err, "trace wrapped function")
+			require.NoErrorf(t, call.span.err, "trace span error")
+		})
+	}
+}
+
+func TestTraceHook_RawExecdRequestErrorRecordsStatusAndError(t *testing.T) {
+	getCalls := captureTraceCalls(t)
+	_, client := newExecdServer(t, func(w http.ResponseWriter, r *http.Request) {
+		jsonResponse(w, http.StatusInternalServerError, ErrorResponse{
+			Code:    "LOGS_UNAVAILABLE",
+			Message: "logs unavailable",
+		})
+	})
+
+	_, err := client.GetCommandLogs(context.Background(), "cmd-error", nil)
+	require.Error(t, err)
+
+	calls := getCalls()
+	require.Len(t, calls, 1)
+	call := calls[0]
+	require.Equal(t, "opensandbox_http_request", call.name)
+	require.Equal(t, http.MethodGet, call.tags["method"])
+	require.Equal(t, "/command/cmd-error/logs", call.tags["path"])
+	output, ok := call.span.output.(map[string]any)
+	require.True(t, ok, "trace output = %T, want map[string]any", call.span.output)
+	require.Equal(t, http.StatusInternalServerError, output["status_code"])
+	require.Error(t, call.err)
+	require.Error(t, call.span.err)
+}
+
+func TestTraceHook_RequestErrorRecordsStatusAndError(t *testing.T) {
+	var mu sync.Mutex
+	var calls []testTraceCall
+	SetTraceHook(func(ctx context.Context, spanName string, tags map[string]any, fn func(context.Context, TraceSpan) error) error {
+		span := &testTraceSpan{}
+		err := fn(ctx, span)
+		mu.Lock()
+		calls = append(calls, testTraceCall{name: spanName, tags: tags, span: span, err: err})
+		mu.Unlock()
+		return err
+	})
+	t.Cleanup(func() { SetTraceHook(nil) })
+
+	_, client := newLifecycleServer(t, func(w http.ResponseWriter, r *http.Request) {
+		jsonResponse(w, http.StatusServiceUnavailable, ErrorResponse{
+			Code:    "SERVICE_UNAVAILABLE",
+			Message: "try later",
+		})
+	})
+
+	_, err := client.CreateSandbox(context.Background(), CreateSandboxRequest{
+		Image:          &ImageSpec{URI: "python:3.12"},
+		Entrypoint:     []string{"/bin/sh"},
+		ResourceLimits: ResourceLimits{"cpu": "500m"},
+	})
+	require.Error(t, err)
+
+	require.Len(t, calls, 1)
+	call := calls[0]
+	if call.name != "opensandbox_http_request" {
+		assert.Fail(t, fmt.Sprintf("trace name = %q, want opensandbox_http_request", call.name))
+	}
+	output, ok := call.span.output.(map[string]any)
+	require.True(t, ok, "trace output = %T, want map[string]any", call.span.output)
+	if output["status_code"] != http.StatusServiceUnavailable {
+		assert.Fail(
+			t,
+			fmt.Sprintf("status_code = %#v, want %d", output["status_code"], http.StatusServiceUnavailable),
+		)
+	}
+	require.Error(t, call.err)
+	require.Error(t, call.span.err)
+}
+
+func TestTraceHook_StreamConnectRecordsRequestAndStatus(t *testing.T) {
+	var mu sync.Mutex
+	var calls []testTraceCall
+	SetTraceHook(func(ctx context.Context, spanName string, tags map[string]any, fn func(context.Context, TraceSpan) error) error {
+		span := &testTraceSpan{}
+		err := fn(ctx, span)
+		mu.Lock()
+		calls = append(calls, testTraceCall{name: spanName, tags: tags, span: span, err: err})
+		mu.Unlock()
+		return err
+	})
+	t.Cleanup(func() { SetTraceHook(nil) })
+
+	_, client := newExecdServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("event: stdout\ndata: {\"text\":\"ok\"}\n\n"))
+	})
+
+	err := client.RunCommand(context.Background(), RunCommandRequest{Command: "echo ok"}, func(event StreamEvent) error {
+		return nil
+	})
+	require.NoErrorf(t, err, "RunCommand")
+
+	require.Len(t, calls, 1)
+	call := calls[0]
+	if call.name != "opensandbox_http_stream_connect" {
+		assert.Fail(t, fmt.Sprintf("trace name = %q, want opensandbox_http_stream_connect", call.name))
+	}
+	if call.tags["method"] != http.MethodPost || call.tags["path"] != "/command" {
+		assert.Fail(t, fmt.Sprintf("trace tags = %#v, want POST /command", call.tags))
+	}
+	output, ok := call.span.output.(map[string]any)
+	require.True(t, ok, "trace output = %T, want map[string]any", call.span.output)
+	if output["status_code"] != http.StatusOK {
+		assert.Fail(t, fmt.Sprintf("status_code = %#v, want %d", output["status_code"], http.StatusOK))
+	}
+	require.NoErrorf(t, call.err, "trace wrapped function")
+	require.NoErrorf(t, call.span.err, "trace span error")
+}

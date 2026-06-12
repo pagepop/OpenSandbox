@@ -1,0 +1,32 @@
+name: Validate PR Shape
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize, ready_for_review]
+    branches: [main]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  single-commit:
+    name: Require one commit
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check commit count
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const pr = context.payload.pull_request;
+            if (!pr) {
+              core.setFailed("This workflow must run on pull_request events.");
+              return;
+            }
+
+            const commits = pr.commits;
+            if (commits !== 1) {
+              core.setFailed(
+                `This PR has ${commits} commits. Please squash locally into one commit and force push the branch.`
+              );
+            }

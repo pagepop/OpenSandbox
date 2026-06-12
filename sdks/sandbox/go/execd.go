@@ -164,47 +164,56 @@ func (e *ExecdClient) GetCommandLogs(ctx context.Context, commandID string, curs
 	}
 
 	var result *CommandLogsResponse
-	err := e.client.withRetry(ctx, func() error {
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, e.client.baseURL+path, nil)
-		if err != nil {
-			return fmt.Errorf("opensandbox: create request: %w", err)
-		}
-		req.Header.Set("User-Agent", "OpenSandbox-Go-SDK/"+Version)
-		for k, v := range e.client.headers {
-			req.Header.Set(k, v)
-		}
-		if e.client.apiKey != "" {
-			req.Header.Set(e.client.authHeader, e.client.apiKey)
-		}
-		req.Header.Set("Accept", "text/plain")
-
-		resp, err := e.client.httpClient.Do(req)
-		if err != nil {
-			return fmt.Errorf("opensandbox: do request: %w", err)
-		}
-		defer resp.Body.Close()
-
-		if resp.StatusCode >= 400 {
-			return handleError(resp)
-		}
-
-		body, err := io.ReadAll(resp.Body)
-		if err != nil {
-			return fmt.Errorf("opensandbox: read response: %w", err)
-		}
-
-		logResp := &CommandLogsResponse{
-			Output: string(body),
-		}
-		if cursorStr := resp.Header.Get("EXECD-COMMANDS-TAIL-CURSOR"); cursorStr != "" {
-			parsed, parseErr := strconv.ParseInt(cursorStr, 10, 64)
-			if parseErr != nil {
-				return fmt.Errorf("opensandbox: invalid EXECD-COMMANDS-TAIL-CURSOR header %q: %w", cursorStr, parseErr)
+	tags := map[string]any{"method": http.MethodGet, "path": path}
+	err := withTraceSpan(ctx, "opensandbox_http_request", tags, func(traceCtx context.Context, span TraceSpan) error {
+		err := e.client.withRetry(traceCtx, func() error {
+			req, err := http.NewRequestWithContext(traceCtx, http.MethodGet, e.client.baseURL+path, nil)
+			if err != nil {
+				return fmt.Errorf("opensandbox: create request: %w", err)
 			}
-			logResp.Cursor = parsed
+			req.Header.Set("User-Agent", "OpenSandbox-Go-SDK/"+Version)
+			for k, v := range e.client.headers {
+				req.Header.Set(k, v)
+			}
+			if e.client.apiKey != "" {
+				req.Header.Set(e.client.authHeader, e.client.apiKey)
+			}
+			req.Header.Set("Accept", "text/plain")
+
+			resp, err := e.client.httpClient.Do(req)
+			if err != nil {
+				return fmt.Errorf("opensandbox: do request: %w", err)
+			}
+			defer resp.Body.Close()
+			span.SetTags(traceCtx, map[string]any{"status_code": resp.StatusCode})
+			span.SetOutput(traceCtx, map[string]any{"status_code": resp.StatusCode})
+
+			if resp.StatusCode >= 400 {
+				return handleError(resp)
+			}
+
+			body, err := io.ReadAll(resp.Body)
+			if err != nil {
+				return fmt.Errorf("opensandbox: read response: %w", err)
+			}
+
+			logResp := &CommandLogsResponse{
+				Output: string(body),
+			}
+			if cursorStr := resp.Header.Get("EXECD-COMMANDS-TAIL-CURSOR"); cursorStr != "" {
+				parsed, parseErr := strconv.ParseInt(cursorStr, 10, 64)
+				if parseErr != nil {
+					return fmt.Errorf("opensandbox: invalid EXECD-COMMANDS-TAIL-CURSOR header %q: %w", cursorStr, parseErr)
+				}
+				logResp.Cursor = parsed
+			}
+			result = logResp
+			return nil
+		})
+		if err != nil {
+			span.SetError(traceCtx, err)
 		}
-		result = logResp
-		return nil
+		return err
 	})
 	if err != nil {
 		return nil, err
@@ -317,29 +326,40 @@ func (e *ExecdClient) UploadFile(ctx context.Context, file io.Reader, opts Uploa
 
 // UploadFiles uploads one or more files to the sandbox in a single multipart request.
 func (e *ExecdClient) UploadFiles(ctx context.Context, entries []UploadFileEntry) error {
-	req, bodyCloser, err := e.newUploadFilesRequest(ctx, entries)
-	if err != nil {
-		return err
-	}
-	defer bodyCloser.Close()
+	tags := map[string]any{"method": http.MethodPost, "path": "/files/upload"}
+	return withTraceSpan(ctx, "opensandbox_http_request", tags, func(traceCtx context.Context, span TraceSpan) error {
+		req, bodyCloser, err := e.newUploadFilesRequest(traceCtx, entries)
+		if err != nil {
+			span.SetError(traceCtx, err)
+			return err
+		}
+		defer bodyCloser.Close()
 
-	req.Header.Set("User-Agent", "OpenSandbox-Go-SDK/"+Version)
-	for k, v := range e.client.headers {
-		req.Header.Set(k, v)
-	}
-	if e.client.apiKey != "" {
-		req.Header.Set(e.client.authHeader, e.client.apiKey)
-	}
+		req.Header.Set("User-Agent", "OpenSandbox-Go-SDK/"+Version)
+		for k, v := range e.client.headers {
+			req.Header.Set(k, v)
+		}
+		if e.client.apiKey != "" {
+			req.Header.Set(e.client.authHeader, e.client.apiKey)
+		}
 
-	resp, err := e.client.httpClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("opensandbox: do request: %w", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode >= 400 {
-		return handleError(resp)
-	}
-	return nil
+		resp, err := e.client.httpClient.Do(req)
+		if err != nil {
+			err = fmt.Errorf("opensandbox: do request: %w", err)
+			span.SetError(traceCtx, err)
+			return err
+		}
+		defer resp.Body.Close()
+		span.SetTags(traceCtx, map[string]any{"status_code": resp.StatusCode})
+		span.SetOutput(traceCtx, map[string]any{"status_code": resp.StatusCode})
+
+		if resp.StatusCode >= 400 {
+			err := handleError(resp)
+			span.SetError(traceCtx, err)
+			return err
+		}
+		return nil
+	})
 }
 
 func (e *ExecdClient) newUploadFilesRequest(ctx context.Context, entries []UploadFileEntry) (*http.Request, io.Closer, error) {
@@ -418,32 +438,42 @@ func (e *ExecdClient) DownloadFile(ctx context.Context, remotePath string, range
 	reqPath := "/files/download?" + params.Encode()
 
 	var resp *http.Response
-	err := e.client.withRetry(ctx, func() error {
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, e.client.baseURL+reqPath, nil)
-		if err != nil {
-			return fmt.Errorf("opensandbox: create request: %w", err)
-		}
-		req.Header.Set("User-Agent", "OpenSandbox-Go-SDK/"+Version)
-		for k, v := range e.client.headers {
-			req.Header.Set(k, v)
-		}
-		if e.client.apiKey != "" {
-			req.Header.Set(e.client.authHeader, e.client.apiKey)
-		}
-		if rangeHeader != "" {
-			req.Header.Set("Range", rangeHeader)
-		}
+	tags := map[string]any{"method": http.MethodGet, "path": reqPath}
+	err := withTraceSpan(ctx, "opensandbox_http_request", tags, func(traceCtx context.Context, span TraceSpan) error {
+		err := e.client.withRetry(traceCtx, func() error {
+			req, err := http.NewRequestWithContext(traceCtx, http.MethodGet, e.client.baseURL+reqPath, nil)
+			if err != nil {
+				return fmt.Errorf("opensandbox: create request: %w", err)
+			}
+			req.Header.Set("User-Agent", "OpenSandbox-Go-SDK/"+Version)
+			for k, v := range e.client.headers {
+				req.Header.Set(k, v)
+			}
+			if e.client.apiKey != "" {
+				req.Header.Set(e.client.authHeader, e.client.apiKey)
+			}
+			if rangeHeader != "" {
+				req.Header.Set("Range", rangeHeader)
+			}
 
-		r, err := e.client.httpClient.Do(req)
+			r, err := e.client.httpClient.Do(req)
+			if err != nil {
+				return fmt.Errorf("opensandbox: do request: %w", err)
+			}
+			span.SetTags(traceCtx, map[string]any{"status_code": r.StatusCode})
+			span.SetOutput(traceCtx, map[string]any{"status_code": r.StatusCode})
+
+			if r.StatusCode >= 400 {
+				defer r.Body.Close()
+				return handleError(r)
+			}
+			resp = r
+			return nil
+		})
 		if err != nil {
-			return fmt.Errorf("opensandbox: do request: %w", err)
+			span.SetError(traceCtx, err)
 		}
-		if r.StatusCode >= 400 {
-			defer r.Body.Close()
-			return handleError(r)
-		}
-		resp = r
-		return nil
+		return err
 	})
 	if err != nil {
 		return nil, err

@@ -598,6 +598,68 @@ class TestCreateSandboxRequestWithVolumes:
         assert request.volumes[1].mount_path == "/mnt/models"
         assert request.volumes[1].read_only is True
 
+    def test_deserialization_with_pagepop_shared_pvc_volume_shape(self):
+        data = {
+            "image": {"uri": "python:3.11"},
+            "timeout": 3600,
+            "resourceLimits": {"cpu": "500m", "memory": "512Mi"},
+            "entrypoint": ["python", "-c", "print('hello')"],
+            "volumes": [
+                {
+                    "name": "skills",
+                    "pvc": {"claimName": "oss-pvc-r"},
+                    "mountPath": "/opt/pagepop/skills",
+                    "readOnly": True,
+                    "subPath": "skill-hub/publish",
+                },
+                {
+                    "name": "draft",
+                    "pvc": {"claimName": "oss-pvc-r"},
+                    "mountPath": "/opt/pagepop/draft",
+                    "readOnly": True,
+                    "subPath": "skill-hub/draft",
+                },
+            ],
+        }
+
+        request = CreateSandboxRequest.model_validate(data)
+
+        assert request.volumes is not None
+        assert len(request.volumes) == 2
+        assert {volume.pvc.claim_name for volume in request.volumes if volume.pvc} == {
+            "oss-pvc-r"
+        }
+        assert [volume.mount_path for volume in request.volumes] == [
+            "/opt/pagepop/skills",
+            "/opt/pagepop/draft",
+        ]
+        assert [volume.sub_path for volume in request.volumes] == [
+            "skill-hub/publish",
+            "skill-hub/draft",
+        ]
+
+    def test_legacy_raw_mounts_are_not_mapped_to_official_volumes(self):
+        data = {
+            "image": {"uri": "python:3.11"},
+            "timeout": 3600,
+            "resourceLimits": {"cpu": "500m", "memory": "512Mi"},
+            "entrypoint": ["python", "-c", "print('hello')"],
+            "mounts": [
+                {
+                    "name": "legacy-mount",
+                    "mountPath": "/opt/pagepop/legacy",
+                    "readOnly": True,
+                }
+            ],
+        }
+
+        request = CreateSandboxRequest.model_validate(data)
+        serialized = request.model_dump(by_alias=True, exclude_none=True)
+
+        assert request.volumes is None
+        assert "mounts" not in serialized
+        assert "volumes" not in serialized
+
     def test_deserialization_with_platform(self):
         data = {
             "image": {"uri": "python:3.11"},
@@ -697,4 +759,3 @@ class TestCreateSandboxRequestPoolMode:
             CreateSandboxRequest(
                 extensions={"poolRef": "   "},
             )
-

@@ -186,6 +186,122 @@ def test_create_sandbox_accepts_snapshot_id_with_entrypoint(
     assert calls[0].entrypoint == ["python", "app.py"]
 
 
+def test_create_sandbox_pagepop_shared_pvc_volumes_reach_service(
+    client: TestClient,
+    auth_headers: dict,
+    monkeypatch,
+) -> None:
+    now = datetime.now(timezone.utc)
+    calls: list[object] = []
+
+    class StubService:
+        @staticmethod
+        async def create_sandbox(request) -> CreateSandboxResponse:
+            calls.append(request)
+            return CreateSandboxResponse(
+                id="sbx-pagepop-volumes",
+                status=SandboxStatus(state="Pending"),
+                metadata={"case": "pagepop-shared-pvc"},
+                expiresAt=now + timedelta(hours=1),
+                createdAt=now,
+                entrypoint=["tail", "-f", "/dev/null"],
+            )
+
+    monkeypatch.setattr(lifecycle, "sandbox_service", StubService())
+
+    response = client.post(
+        "/v1/sandboxes",
+        headers=auth_headers,
+        json={
+            "image": {"uri": "python:3.11"},
+            "timeout": 3600,
+            "resourceLimits": {"cpu": "500m", "memory": "512Mi"},
+            "entrypoint": ["tail", "-f", "/dev/null"],
+            "volumes": [
+                {
+                    "name": "skills",
+                    "pvc": {"claimName": "oss-pvc-r"},
+                    "mountPath": "/opt/pagepop/skills",
+                    "readOnly": True,
+                    "subPath": "skill-hub/publish",
+                },
+                {
+                    "name": "draft",
+                    "pvc": {"claimName": "oss-pvc-r"},
+                    "mountPath": "/opt/pagepop/draft",
+                    "readOnly": True,
+                    "subPath": "skill-hub/draft",
+                },
+            ],
+        },
+    )
+
+    assert response.status_code == 202
+    assert len(calls) == 1
+    request = calls[0]
+    assert request.volumes is not None
+    assert [volume.name for volume in request.volumes] == ["skills", "draft"]
+    assert {volume.pvc.claim_name for volume in request.volumes if volume.pvc} == {
+        "oss-pvc-r"
+    }
+    assert [volume.mount_path for volume in request.volumes] == [
+        "/opt/pagepop/skills",
+        "/opt/pagepop/draft",
+    ]
+    assert [volume.sub_path for volume in request.volumes] == [
+        "skill-hub/publish",
+        "skill-hub/draft",
+    ]
+    assert all(volume.read_only is True for volume in request.volumes)
+
+
+def test_create_sandbox_legacy_raw_mounts_do_not_reach_service_as_volumes(
+    client: TestClient,
+    auth_headers: dict,
+    monkeypatch,
+) -> None:
+    now = datetime.now(timezone.utc)
+    calls: list[object] = []
+
+    class StubService:
+        @staticmethod
+        async def create_sandbox(request) -> CreateSandboxResponse:
+            calls.append(request)
+            return CreateSandboxResponse(
+                id="sbx-legacy-raw-mounts",
+                status=SandboxStatus(state="Pending"),
+                metadata={"case": "legacy-raw-mounts"},
+                expiresAt=now + timedelta(hours=1),
+                createdAt=now,
+                entrypoint=["tail", "-f", "/dev/null"],
+            )
+
+    monkeypatch.setattr(lifecycle, "sandbox_service", StubService())
+
+    response = client.post(
+        "/v1/sandboxes",
+        headers=auth_headers,
+        json={
+            "image": {"uri": "python:3.11"},
+            "timeout": 3600,
+            "resourceLimits": {"cpu": "500m", "memory": "512Mi"},
+            "entrypoint": ["tail", "-f", "/dev/null"],
+            "mounts": [
+                {
+                    "name": "legacy-skills",
+                    "mountPath": "/opt/pagepop/skills",
+                    "readOnly": True,
+                    "subPath": "skill-hub/publish",
+                }
+            ],
+        },
+    )
+
+    assert response.status_code == 202
+    assert len(calls) == 1
+    assert calls[0].volumes is None
+
+
 def test_delete_sandbox_returns_204_and_calls_service(
     client: TestClient,
     auth_headers: dict,

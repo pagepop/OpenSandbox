@@ -2945,3 +2945,76 @@ spec:
         assert by_path["/path/to/skills"].get("subPath") == "skill-hub/publish"
         assert by_path["/path/to/draft"]["name"] == "skills"
         assert by_path["/path/to/draft"].get("subPath") == "skill-hub/draft"
+
+    def test_create_workload_with_pagepop_shared_pvc_volume_shape(self, mock_k8s_client):
+        """
+        PagePop should migrate old mount requests into official Volume entries.
+
+        Both old and new clusters must see the same resulting pod intent: one
+        PVC volume definition and two read-only mounts with distinct subPath
+        values.
+        """
+        from opensandbox_server.api.schema import Volume, PVC
+
+        provider = BatchSandboxProvider(mock_k8s_client)
+        mock_k8s_client.create_custom_object.return_value = {
+            "metadata": {"name": "test-id", "uid": "test-uid"}
+        }
+        volumes = [
+            Volume(
+                name="skills",
+                pvc=PVC(claim_name="oss-pvc-r"),
+                mount_path="/opt/pagepop/skills",
+                sub_path="skill-hub/publish",
+                read_only=True,
+            ),
+            Volume(
+                name="draft",
+                pvc=PVC(claim_name="oss-pvc-r"),
+                mount_path="/opt/pagepop/draft",
+                sub_path="skill-hub/draft",
+                read_only=True,
+            ),
+        ]
+
+        provider.create_workload(
+            sandbox_id="test-id",
+            namespace="test-ns",
+            image_spec=ImageSpec(uri="python:3.11"),
+            entrypoint=["/bin/bash"],
+            env={},
+            resource_limits={},
+            labels={},
+            expires_at=datetime(2025, 12, 31, tzinfo=timezone.utc),
+            execd_image="execd:latest",
+            volumes=volumes,
+        )
+
+        body = mock_k8s_client.create_custom_object.call_args.kwargs["body"]
+        pod_spec = body["spec"]["template"]["spec"]
+        pagepop_volumes = [
+            volume
+            for volume in pod_spec["volumes"]
+            if volume.get("persistentVolumeClaim", {}).get("claimName") == "oss-pvc-r"
+        ]
+        assert pagepop_volumes == [
+            {
+                "name": "skills",
+                "persistentVolumeClaim": {"claimName": "oss-pvc-r"},
+            }
+        ]
+
+        mounts = pod_spec["containers"][0]["volumeMounts"]
+        by_path = {mount["mountPath"]: mount for mount in mounts}
+        assert by_path["/opt/pagepop/skills"] == {
+            "name": "skills",
+            "mountPath": "/opt/pagepop/skills",
+            "readOnly": True,
+            "subPath": "skill-hub/publish",
+        }
+        assert by_path["/opt/pagepop/draft"] == {
+            "name": "skills",
+            "mountPath": "/opt/pagepop/draft",
+            "readOnly": True,
+            "subPath": "skill-hub/draft",
+        }
