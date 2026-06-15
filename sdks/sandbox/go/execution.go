@@ -122,8 +122,12 @@ type sseErrorPayload struct {
 // Supports both the spec format (nested error/results objects) and the
 // legacy flat format (top-level ename/evalue/traceback) for backward compat.
 type sseEvent struct {
-	Type          string `json:"type"`
-	Text          string `json:"text"`
+	Type string `json:"type"`
+	Text string `json:"text"`
+	// Migration compatibility: legacy private execd streams used `data`
+	// instead of `text` for plain payloads. Remove this after all traffic and
+	// migration tests run only against official execd.
+	Data          string `json:"data,omitempty"`
 	Timestamp     int64  `json:"timestamp"`
 	ExitCode      *int   `json:"exit_code,omitempty"`
 	ExecutionTime int64  `json:"execution_time,omitempty"`
@@ -137,6 +141,13 @@ type sseEvent struct {
 	EName     string   `json:"ename,omitempty"`
 	EValue    string   `json:"evalue,omitempty"`
 	Traceback []string `json:"traceback,omitempty"`
+}
+
+func streamText(ev sseEvent) string {
+	if ev.Text != "" {
+		return ev.Text
+	}
+	return ev.Data
 }
 
 // processStreamEvent parses a raw StreamEvent into the Execution accumulator
@@ -162,14 +173,15 @@ func processStreamEvent(exec *Execution, event StreamEvent, handlers *ExecutionH
 
 	switch ev.Type {
 	case "init":
-		initEvent := ExecutionInit{ID: ev.Text, Timestamp: ev.Timestamp}
-		exec.ID = ev.Text
+		text := streamText(ev)
+		initEvent := ExecutionInit{ID: text, Timestamp: ev.Timestamp}
+		exec.ID = text
 		if handlers != nil && handlers.OnInit != nil {
 			return handlers.OnInit(initEvent)
 		}
 
 	case "stdout":
-		msg := OutputMessage{Text: ev.Text, Timestamp: ev.Timestamp}
+		msg := OutputMessage{Text: streamText(ev), Timestamp: ev.Timestamp}
 		if handlers == nil || !handlers.SkipAccumulation {
 			exec.Stdout = append(exec.Stdout, msg)
 		}
@@ -178,7 +190,7 @@ func processStreamEvent(exec *Execution, event StreamEvent, handlers *ExecutionH
 		}
 
 	case "stderr":
-		msg := OutputMessage{Text: ev.Text, Timestamp: ev.Timestamp}
+		msg := OutputMessage{Text: streamText(ev), Timestamp: ev.Timestamp}
 		if handlers == nil || !handlers.SkipAccumulation {
 			exec.Stderr = append(exec.Stderr, msg)
 		}
@@ -191,9 +203,9 @@ func processStreamEvent(exec *Execution, event StreamEvent, handlers *ExecutionH
 		if ev.Results != nil {
 			// Spec format: MIME-keyed map under "results"
 			res.Results = ev.Results
-		} else if ev.Text != "" {
-			// Legacy flat format: bare "text" field
-			res.Results = map[string]string{"text/plain": ev.Text}
+		} else if text := streamText(ev); text != "" {
+			// Legacy flat format: bare "text" or pre-official "data" field.
+			res.Results = map[string]string{"text/plain": text}
 		}
 		exec.Results = append(exec.Results, res)
 		if handlers != nil && handlers.OnResult != nil {
@@ -248,8 +260,8 @@ func processStreamEvent(exec *Execution, event StreamEvent, handlers *ExecutionH
 
 	default:
 		// Unknown event type — treat as stdout
-		if ev.Text != "" {
-			msg := OutputMessage{Text: ev.Text, Timestamp: ev.Timestamp}
+		if text := streamText(ev); text != "" {
+			msg := OutputMessage{Text: text, Timestamp: ev.Timestamp}
 			if handlers == nil || !handlers.SkipAccumulation {
 				exec.Stdout = append(exec.Stdout, msg)
 			}

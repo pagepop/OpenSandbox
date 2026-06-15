@@ -2369,6 +2369,37 @@ func TestExecution_ProcessStreamEvents(t *testing.T) {
 	}
 }
 
+func TestExecution_ProcessLegacyDataStreamEvents(t *testing.T) {
+	// Migration compatibility: the legacy private execd stream used `data`
+	// instead of `text` for plain payloads. This fallback can be removed once
+	// all PagePop traffic and migration tests run only against official execd.
+	exec := &Execution{}
+	events := []StreamEvent{
+		{Event: "init", Data: `{"type":"init","data":"legacy-exec-42","timestamp":100}`},
+		{Event: "stdout", Data: `{"type":"stdout","data":"legacy stdout","timestamp":101}`},
+		{Event: "stderr", Data: `{"type":"stderr","data":"legacy stderr","timestamp":102}`},
+		{Event: "result", Data: `{"type":"result","data":"legacy result","timestamp":103}`},
+	}
+
+	for _, ev := range events {
+		err := processStreamEvent(exec, ev, nil)
+		require.NoErrorf(t, err, "processStreamEvent(%s)", ev.Event)
+	}
+
+	if exec.ID != "legacy-exec-42" {
+		assert.Fail(t, fmt.Sprintf("ID = %q, want legacy-exec-42", exec.ID))
+	}
+	if len(exec.Stdout) != 1 || exec.Stdout[0].Text != "legacy stdout" {
+		assert.Fail(t, fmt.Sprintf("Stdout = %+v, want [legacy stdout]", exec.Stdout))
+	}
+	if len(exec.Stderr) != 1 || exec.Stderr[0].Text != "legacy stderr" {
+		assert.Fail(t, fmt.Sprintf("Stderr = %+v, want [legacy stderr]", exec.Stderr))
+	}
+	if len(exec.Results) != 1 || exec.Results[0].Text() != "legacy result" {
+		assert.Fail(t, fmt.Sprintf("Results = %+v, want legacy result", exec.Results))
+	}
+}
+
 func TestExecution_ErrorEvent(t *testing.T) {
 	exec := &Execution{}
 	event := StreamEvent{
