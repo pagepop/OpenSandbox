@@ -103,7 +103,13 @@ func createLegacyRawMountSandbox(
 		"metadata":       map[string]string{"migrationCase": "legacy-raw-mounts"},
 		"volumes": []map[string]any{
 			{
-				"name": "pagepop-shared-pvc",
+				"name": "pagepop-shared-pvc-skills",
+				"persistentVolumeClaim": map[string]any{
+					"claimName": pvcName,
+				},
+			},
+			{
+				"name": "pagepop-shared-pvc-draft",
 				"persistentVolumeClaim": map[string]any{
 					"claimName": pvcName,
 				},
@@ -111,13 +117,16 @@ func createLegacyRawMountSandbox(
 		},
 		"mounts": []map[string]any{
 			{
-				"name":      "pagepop-shared-pvc",
+				// Migration compatibility: the legacy provider de-duplicates
+				// volumeMounts by name, so each mount path needs a distinct
+				// volume name even when both volumes reference the same PVC.
+				"name":      "pagepop-shared-pvc-skills",
 				"mountPath": "/opt/pagepop/skills",
 				"readOnly":  true,
 				"subPath":   leftSubPath,
 			},
 			{
-				"name":      "pagepop-shared-pvc",
+				"name":      "pagepop-shared-pvc-draft",
 				"mountPath": "/opt/pagepop/draft",
 				"readOnly":  true,
 				"subPath":   rightSubPath,
