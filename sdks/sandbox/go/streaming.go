@@ -18,7 +18,9 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 )
@@ -70,6 +72,9 @@ func streamSSE(ctx context.Context, resp *http.Response, handler EventHandler) e
 				eventCount++
 			}
 			if err := scanner.Err(); err != nil {
+				if eventCount > 0 && isLegacyChunkedCloseError(err) {
+					return nil
+				}
 				return fmt.Errorf("opensandbox: sse read: %w", err)
 			}
 			if eventCount == 0 {
@@ -128,4 +133,15 @@ func streamSSE(ctx context.Context, resp *http.Response, handler EventHandler) e
 			current.ID = value
 		}
 	}
+}
+
+func isLegacyChunkedCloseError(err error) bool {
+	if err == nil {
+		return false
+	}
+	// Migration compatibility: the legacy private execd can close chunked SSE
+	// responses without the final chunk marker. Once PagePop no longer verifies
+	// or talks to the private legacy execd, this compatibility path can be
+	// removed and malformed chunked streams should become hard errors again.
+	return errors.Is(err, io.ErrUnexpectedEOF) || strings.Contains(err.Error(), "malformed chunked encoding")
 }
