@@ -1095,6 +1095,45 @@ func TestStreamSSE_NDJSON(t *testing.T) {
 	}
 }
 
+type errorAfterReader struct {
+	err error
+}
+
+func (r errorAfterReader) Read([]byte) (int, error) {
+	return 0, r.err
+}
+
+func TestStreamSSE_LegacyMalformedChunkedCloseAfterEvents(t *testing.T) {
+	body := io.NopCloser(io.MultiReader(
+		strings.NewReader("event: stdout\ndata: legacy stdout\n\n"),
+		errorAfterReader{err: fmt.Errorf("malformed chunked encoding")},
+	))
+	resp := &http.Response{Body: body}
+
+	var events []StreamEvent
+	err := streamSSE(context.Background(), resp, func(event StreamEvent) error {
+		events = append(events, event)
+		return nil
+	})
+	require.NoErrorf(t, err, "legacy malformed chunked close after events")
+	require.Len(t, events, 1)
+	if events[0].Event != "stdout" || events[0].Data != "legacy stdout" {
+		assert.Fail(t, fmt.Sprintf("event[0] = %+v", events[0]))
+	}
+}
+
+func TestStreamSSE_MalformedChunkedCloseBeforeEventsFails(t *testing.T) {
+	body := io.NopCloser(errorAfterReader{err: fmt.Errorf("malformed chunked encoding")})
+	resp := &http.Response{Body: body}
+
+	err := streamSSE(context.Background(), resp, func(event StreamEvent) error {
+		require.FailNow(t, "handler should not be called before any event is parsed")
+		return nil
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "malformed chunked encoding")
+}
+
 func TestLifecycleAuthHeader(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		got := r.Header.Get("OPEN-SANDBOX-API-KEY")
