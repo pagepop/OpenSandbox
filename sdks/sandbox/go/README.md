@@ -282,6 +282,20 @@ SDK-created HTTP clients enforce NIST 2030 minimum TLS certificate strength by d
 (RSA >= 2048, EC >= 224, DSA P >= 2048/Q >= 224, hash >= 224). If you must interoperate
 with legacy endpoints, set `AllowWeakServerCertKeyLengths: true` in `TransportConfig`.
 
+## Tracing
+
+Register a process-wide trace hook to observe lifecycle, execd, and egress HTTP calls:
+
+```go
+opensandbox.SetTraceHook(func(ctx context.Context, name string, tags map[string]any, fn func(context.Context, opensandbox.TraceSpan) error) error {
+    return tracer.Start(ctx, name, tags, fn)
+})
+```
+
+The SDK records `opensandbox_http_request` for normal requests and
+`opensandbox_http_stream_connect` for streaming connection setup. Spans receive
+`method`, `path`, and `status_code` tags when those values are available.
+
 ## Error Handling
 
 Non-2xx responses are returned as `*opensandbox.APIError`:

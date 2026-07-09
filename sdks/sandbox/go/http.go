@@ -122,13 +122,27 @@ func NewClient(baseURL, apiKey, authHeader string, opts ...Option) *Client {
 // If body is nil, no request body is sent. If result is non-nil, the
 // response body is decoded into it.
 func (c *Client) doRequest(ctx context.Context, method, path string, body any, result any) error {
-	return c.withRetry(ctx, func() error {
-		return c.doRequestOnce(ctx, method, path, body, result)
+	tags := map[string]any{"method": method, "path": path}
+	return withTraceSpan(ctx, "opensandbox_http_request", tags, func(traceCtx context.Context, span TraceSpan) error {
+		err := c.withRetry(traceCtx, func() error {
+			return c.doRequestOnce(traceCtx, method, path, body, result, span)
+		})
+		if err != nil {
+			span.SetError(traceCtx, err)
+		}
+		return err
 	})
 }
 
 // doRequestOnce is the single-attempt implementation of doRequest.
-func (c *Client) doRequestOnce(ctx context.Context, method, path string, body any, result any) error {
+func (c *Client) doRequestOnce(
+	ctx context.Context,
+	method string,
+	path string,
+	body any,
+	result any,
+	span TraceSpan,
+) error {
 	var bodyReader io.Reader
 	if body != nil {
 		buf, err := json.Marshal(body)
@@ -160,6 +174,8 @@ func (c *Client) doRequestOnce(ctx context.Context, method, path string, body an
 		return fmt.Errorf("opensandbox: do request: %w", err)
 	}
 	defer resp.Body.Close()
+	span.SetTags(ctx, map[string]any{"status_code": resp.StatusCode})
+	span.SetOutput(ctx, map[string]any{"status_code": resp.StatusCode})
 
 	if resp.StatusCode >= 400 {
 		return handleError(resp)
@@ -185,45 +201,54 @@ func (c *Client) doRequestOnce(ctx context.Context, method, path string, body an
 func (c *Client) doStreamRequest(ctx context.Context, method, path string, body any, handler EventHandler) error {
 	var resp *http.Response
 
-	connectErr := c.withRetry(ctx, func() error {
-		var bodyReader io.Reader
-		if body != nil {
-			buf, err := json.Marshal(body)
-			if err != nil {
-				return fmt.Errorf("opensandbox: marshal request: %w", err)
+	tags := map[string]any{"method": method, "path": path}
+	connectErr := withTraceSpan(ctx, "opensandbox_http_stream_connect", tags, func(traceCtx context.Context, span TraceSpan) error {
+		err := c.withRetry(traceCtx, func() error {
+			var bodyReader io.Reader
+			if body != nil {
+				buf, err := json.Marshal(body)
+				if err != nil {
+					return fmt.Errorf("opensandbox: marshal request: %w", err)
+				}
+				bodyReader = bytes.NewReader(buf)
 			}
-			bodyReader = bytes.NewReader(buf)
-		}
 
-		req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, bodyReader)
+			req, err := http.NewRequestWithContext(traceCtx, method, c.baseURL+path, bodyReader)
+			if err != nil {
+				return fmt.Errorf("opensandbox: create request: %w", err)
+			}
+
+			req.Header.Set("User-Agent", "OpenSandbox-Go-SDK/"+Version)
+			for k, v := range c.headers {
+				req.Header.Set(k, v)
+			}
+			if c.apiKey != "" {
+				req.Header.Set(c.authHeader, c.apiKey)
+			}
+			if body != nil {
+				req.Header.Set("Content-Type", "application/json")
+			}
+			req.Header.Set("Accept", "text/event-stream")
+
+			r, err := c.httpClient.Do(req)
+			if err != nil {
+				return fmt.Errorf("opensandbox: do request: %w", err)
+			}
+			span.SetTags(traceCtx, map[string]any{"status_code": r.StatusCode})
+			span.SetOutput(traceCtx, map[string]any{"status_code": r.StatusCode})
+
+			if r.StatusCode >= 400 {
+				defer r.Body.Close()
+				return handleError(r)
+			}
+
+			resp = r
+			return nil
+		})
 		if err != nil {
-			return fmt.Errorf("opensandbox: create request: %w", err)
+			span.SetError(traceCtx, err)
 		}
-
-		req.Header.Set("User-Agent", "OpenSandbox-Go-SDK/"+Version)
-		for k, v := range c.headers {
-			req.Header.Set(k, v)
-		}
-		if c.apiKey != "" {
-			req.Header.Set(c.authHeader, c.apiKey)
-		}
-		if body != nil {
-			req.Header.Set("Content-Type", "application/json")
-		}
-		req.Header.Set("Accept", "text/event-stream")
-
-		r, err := c.httpClient.Do(req)
-		if err != nil {
-			return fmt.Errorf("opensandbox: do request: %w", err)
-		}
-
-		if r.StatusCode >= 400 {
-			defer r.Body.Close()
-			return handleError(r)
-		}
-
-		resp = r
-		return nil
+		return err
 	})
 	if connectErr != nil {
 		return connectErr
