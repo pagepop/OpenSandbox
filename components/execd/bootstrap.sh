@@ -20,7 +20,13 @@ _forward_signal() {
 	sig="$1"
 	pid="$2"
 	kill "-$sig" "$pid" 2>/dev/null || true
-	wait "$pid" 2>/dev/null || true
+}
+
+_stop_children() {
+	_forward_signal TERM "$CMD_PID"
+	_forward_signal TERM "$EXECD_PID"
+	wait "$CMD_PID" 2>/dev/null || true
+	wait "$EXECD_PID" 2>/dev/null || true
 	exit 0
 }
 
@@ -198,6 +204,7 @@ fi
 
 echo "starting OpenSandbox Execd daemon at $EXECD."
 $EXECD &
+EXECD_PID=$!
 
 # Allow chained shell commands (e.g., /test1.sh && /test2.sh)
 # Usage:
@@ -234,7 +241,32 @@ else
 	CMD_PID=$!
 fi
 
-trap '_forward_signal TERM "$CMD_PID"' TERM
+trap '_stop_children' TERM
 
+# POSIX sh has no portable "wait for either child" primitive. Poll both direct
+# children so an execd exit is fatal while the workload is still alive.
+while kill -0 "$CMD_PID" 2>/dev/null && kill -0 "$EXECD_PID" 2>/dev/null; do
+	sleep 1
+done
+
+if ! kill -0 "$EXECD_PID" 2>/dev/null; then
+	set +e
+	wait "$EXECD_PID" 2>/dev/null
+	execd_status=$?
+	set -e
+	if kill -0 "$CMD_PID" 2>/dev/null; then
+		_forward_signal TERM "$CMD_PID"
+	fi
+	if [ "$execd_status" -eq 0 ]; then
+		execd_status=1
+	fi
+	exit "$execd_status"
+fi
+
+set +e
 wait "$CMD_PID" 2>/dev/null
-exit $?
+cmd_status=$?
+set -e
+_forward_signal TERM "$EXECD_PID"
+wait "$EXECD_PID" 2>/dev/null || true
+exit "$cmd_status"

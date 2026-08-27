@@ -138,7 +138,31 @@ await sandbox.commands.run(
 );
 ```
 
-### 4. Comprehensive File Operations
+### 4. Managed Processes and Terminals
+
+`sandbox.processes` starts an exact argv vector without shell parsing and keeps stdin, stdout, and stderr attachable across reconnects. `sandbox.terminals` allocates a PTY with merged byte output, raw input, and resize support. Both `create()` methods return immediately; await `handle.ready` before using the published ID or PID.
+
+```ts
+const terminal = sandbox.terminals.create({
+  operationId: crypto.randomUUID(),
+  argv: ["/bin/bash", "-l"],
+  cwd: "/workspace",
+  rows: 40,
+  cols: 120,
+});
+await terminal.ready;
+
+const io = await terminal.attach({ outputOffset: 0 });
+await io.connected;
+await io.write(new TextEncoder().encode("printf 'hello\\n'\nexit\n"));
+for await (const chunk of io.output) {
+  process.stdout.write(chunk);
+}
+```
+
+Raw I/O attachments are a Node.js server-side API because the WebSocket handshake carries execd authentication headers. Retain the attachment offsets for reconnects; a `gap` event reports when requested output has already fallen outside server retention.
+
+### 5. Comprehensive File Operations
 
 Manage files and directories, including read, write, list/search, and delete.
 
@@ -161,7 +185,7 @@ console.log(files.map((f) => f.path));
 await sandbox.files.deleteDirectories(["/tmp/demo"]);
 ```
 
-### 5. Endpoints
+### 6. Endpoints
 
 `getEndpoint()` returns an endpoint **without a scheme** (for example `"localhost:44772"`). Use `getEndpointUrl()` if you want a ready-to-use absolute URL (for example `"http://localhost:44772"`).
 
@@ -170,7 +194,7 @@ const { endpoint } = await sandbox.getEndpoint(44772);
 const url = await sandbox.getEndpointUrl(44772);
 ```
 
-### 6. Volume Mounts
+### 7. Volume Mounts
 
 `volumes` supports `host`, `pvc`, and `ossfs` backends. Each volume must specify exactly one backend.
 
@@ -195,7 +219,7 @@ const sandbox = await Sandbox.create({
 });
 ```
 
-### 7. Sandbox Management (Admin)
+### 8. Sandbox Management (Admin)
 
 Use `SandboxManager` for administrative tasks and finding existing sandboxes.
 

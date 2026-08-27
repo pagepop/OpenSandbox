@@ -32,6 +32,24 @@ import type { ExecdCommands } from "./services/execdCommands.js";
 import type { ExecdHealth } from "./services/execdHealth.js";
 import type { ExecdMetrics } from "./services/execdMetrics.js";
 import type { IsolationService, IsolationSession } from "./services/isolatedSessions.js";
+import type {
+  ManagedProcessAttachment,
+  ManagedProcessHandle,
+  ManagedProcesses,
+} from "./services/managedProcesses.js";
+import type {
+  ManagedTerminalAttachment,
+  ManagedTerminalHandle,
+  ManagedTerminals,
+} from "./services/managedTerminals.js";
+import type {
+  ManagedProcessStatus,
+  ResolveExecutableResponse,
+} from "./models/managedProcess.js";
+import type {
+  ManagedTerminalForeground,
+  ManagedTerminalStatus,
+} from "./models/managedTerminal.js";
 import type { IsolatedCapabilities } from "./models/isolated.js";
 import type {
   CreateSandboxRequest,
@@ -56,6 +74,77 @@ const unavailableIsolation: IsolationService = {
   },
   capabilities(): Promise<IsolatedCapabilities> {
     return Promise.resolve({ available: false, commit_supported: false, diff_supported: false });
+  },
+};
+
+const unavailableManagedProcesses: ManagedProcesses = {
+  resolveExecutable(): Promise<ResolveExecutableResponse> {
+    return Promise.reject(new Error(
+      "Managed processes are not available: the adapter factory did not provide a ManagedProcesses service"
+    ));
+  },
+  create(): ManagedProcessHandle {
+    throw new Error(
+      "Managed processes are not available: the adapter factory did not provide a ManagedProcesses service"
+    );
+  },
+  get(): Promise<ManagedProcessStatus> {
+    return Promise.reject(new Error(
+      "Managed processes are not available: the adapter factory did not provide a ManagedProcesses service"
+    ));
+  },
+  terminate(): Promise<ManagedProcessStatus> {
+    return Promise.reject(new Error(
+      "Managed processes are not available: the adapter factory did not provide a ManagedProcesses service"
+    ));
+  },
+  delete(): Promise<void> {
+    return Promise.reject(new Error(
+      "Managed processes are not available: the adapter factory did not provide a ManagedProcesses service"
+    ));
+  },
+  attach(): Promise<ManagedProcessAttachment> {
+    return Promise.reject(new Error(
+      "Managed processes are not available: the adapter factory did not provide a ManagedProcesses service"
+    ));
+  },
+};
+
+const unavailableManagedTerminals: ManagedTerminals = {
+  create(): ManagedTerminalHandle {
+    throw new Error(
+      "Managed terminals are not available: the adapter factory did not provide a ManagedTerminals service"
+    );
+  },
+  get(): Promise<ManagedTerminalStatus> {
+    return Promise.reject(new Error(
+      "Managed terminals are not available: the adapter factory did not provide a ManagedTerminals service"
+    ));
+  },
+  foreground(): Promise<ManagedTerminalForeground> {
+    return Promise.reject(new Error(
+      "Managed terminals are not available: the adapter factory did not provide a ManagedTerminals service"
+    ));
+  },
+  signalForeground(): Promise<void> {
+    return Promise.reject(new Error(
+      "Managed terminals are not available: the adapter factory did not provide a ManagedTerminals service"
+    ));
+  },
+  terminate(): Promise<ManagedTerminalStatus> {
+    return Promise.reject(new Error(
+      "Managed terminals are not available: the adapter factory did not provide a ManagedTerminals service"
+    ));
+  },
+  delete(): Promise<void> {
+    return Promise.reject(new Error(
+      "Managed terminals are not available: the adapter factory did not provide a ManagedTerminals service"
+    ));
+  },
+  attach(): Promise<ManagedTerminalAttachment> {
+    return Promise.reject(new Error(
+      "Managed terminals are not available: the adapter factory did not provide a ManagedTerminals service"
+    ));
   },
 };
 const CREDENTIAL_VAULT_METHODS = [
@@ -258,6 +347,8 @@ export class Sandbox {
   readonly health: ExecdHealth;
   readonly metrics: ExecdMetrics;
   readonly isolation: IsolationService;
+  readonly processes: ManagedProcesses;
+  readonly terminals: ManagedTerminals;
   /**
    * Sandbox-scoped Credential Vault operations.
    */
@@ -290,6 +381,8 @@ export class Sandbox {
     health: ExecdHealth;
     metrics: ExecdMetrics;
     isolation: IsolationService;
+    processes?: ManagedProcesses;
+    terminals?: ManagedTerminals;
     egress: Egress;
     credentialVault?: CredentialVault;
   }) {
@@ -314,6 +407,8 @@ export class Sandbox {
     this.health = opts.health;
     this.metrics = opts.metrics;
     this.isolation = opts.isolation;
+    this.processes = opts.processes ?? unavailableManagedProcesses;
+    this.terminals = opts.terminals ?? unavailableManagedTerminals;
     this.credentialVault = credentialVault;
   }
 
@@ -428,7 +523,7 @@ export class Sandbox {
         endpointHeaders: egressEndpoint.headers,
       });
 
-      const { commands, files, health, metrics, isolation } = execdStack;
+      const { commands, files, health, metrics, isolation, processes, terminals } = execdStack;
 
       const sbx = new Sandbox({
         id: sandboxId,
@@ -442,6 +537,8 @@ export class Sandbox {
         health,
         metrics,
         isolation: isolation ?? unavailableIsolation,
+        processes,
+        terminals,
         egress,
         credentialVault,
       });
@@ -516,7 +613,7 @@ export class Sandbox {
         endpointHeaders: egressEndpoint.headers,
       });
 
-      const { commands, files, health, metrics, isolation } = execdStack;
+      const { commands, files, health, metrics, isolation, processes, terminals } = execdStack;
 
       const sbx = new Sandbox({
         id: opts.sandboxId,
@@ -530,6 +627,8 @@ export class Sandbox {
         health,
         metrics,
         isolation: isolation ?? unavailableIsolation,
+        processes,
+        terminals,
         egress,
         credentialVault,
       });

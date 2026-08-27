@@ -42,3 +42,7 @@ export { HealthAdapter } from "./adapters/healthAdapter.js";
 export { MetricsAdapter } from "./adapters/metricsAdapter.js";
 export { FilesystemAdapter } from "./adapters/filesystemAdapter.js";
 export { CommandsAdapter } from "./adapters/commandsAdapter.js";
+export { ManagedProcessesAdapter } from "./adapters/managedProcessesAdapter.js";
+export type { ManagedProcessesAdapterOptions } from "./adapters/managedProcessesAdapter.js";
+export { ManagedTerminalsAdapter } from "./adapters/managedTerminalsAdapter.js";
+export type { ManagedTerminalsAdapterOptions } from "./adapters/managedTerminalsAdapter.js";

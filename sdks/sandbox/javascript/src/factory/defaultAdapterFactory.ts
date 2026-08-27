@@ -21,6 +21,8 @@ import { EgressAdapter } from "../adapters/egressAdapter.js";
 import { FilesystemAdapter } from "../adapters/filesystemAdapter.js";
 import { HealthAdapter } from "../adapters/healthAdapter.js";
 import { IsolatedSessionsAdapter } from "../adapters/isolatedSessionsAdapter.js";
+import { ManagedProcessesAdapter } from "../adapters/managedProcessesAdapter.js";
+import { ManagedTerminalsAdapter } from "../adapters/managedTerminalsAdapter.js";
 import { MetricsAdapter } from "../adapters/metricsAdapter.js";
 import { SandboxesAdapter } from "../adapters/sandboxesAdapter.js";
 
@@ -76,6 +78,14 @@ export class DefaultAdapterFactory implements AdapterFactory {
       sseFetch: opts.connectionConfig.sseFetch,
       headers,
     });
+    const processes = new ManagedProcessesAdapter(execdClient, {
+      baseUrl: opts.execdBaseUrl,
+      headers,
+    });
+    const terminals = new ManagedTerminalsAdapter(execdClient, {
+      baseUrl: opts.execdBaseUrl,
+      headers,
+    });
 
     return {
       commands,
@@ -83,6 +93,8 @@ export class DefaultAdapterFactory implements AdapterFactory {
       health,
       metrics,
       isolation: isolated,
+      processes,
+      terminals,
     };
   }
 
