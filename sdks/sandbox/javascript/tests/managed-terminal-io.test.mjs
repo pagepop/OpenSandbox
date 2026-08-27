@@ -156,6 +156,29 @@ test("managed terminal attachment applies output backpressure", { timeout: 5_000
   attachment.close();
 });
 
+test("managed terminal attachment resumes paused input when aborted", { timeout: 5_000 }, async (t) => {
+  const { webSockets, baseUrl } = await listeningServer(t);
+  const flow = trackWebSocketReceiveFlow(t, "/v1/terminals/abort-flow/io");
+  const outputSize = 1024 * 1024;
+  webSockets.once("connection", (socket) => {
+    socket.send(JSON.stringify({
+      type: "connected",
+      terminalId: "abort-flow",
+      outputOffset: outputSize,
+    }));
+    socket.send(outputFrame(0, "x".repeat(outputSize)));
+  });
+
+  const controller = new AbortController();
+  const attachment = await managedTerminals({ baseUrl })
+    .attach("abort-flow", { outputOffset: 0 }, controller.signal);
+  await attachment.connected;
+  await flow.paused;
+  controller.abort(new Error("stop attachment"));
+  assert.equal(flow.resumeCount, 1);
+  assert.deepEqual(flow.actions, ["pause", "resume", "close"]);
+});
+
 test("managed terminal attachment rejects binary data before connected", async (t) => {
   const { webSockets, baseUrl } = await listeningServer(t);
   webSockets.once("connection", (socket) => socket.send(outputFrame(0, "early")));

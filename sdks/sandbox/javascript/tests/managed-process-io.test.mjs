@@ -217,6 +217,49 @@ test("managed process attachment applies aggregate output backpressure", { timeo
   attachment.close();
 });
 
+test("managed process attachment resumes paused input before closing", { timeout: 5_000 }, async (t) => {
+  const server = createServer();
+  const webSockets = new WebSocketServer({ server });
+  t.after(() => {
+    webSockets.close();
+    server.close();
+  });
+  await new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolve);
+  });
+  const address = server.address();
+  assert.equal(typeof address, "object");
+
+  const flow = trackWebSocketReceiveFlow(t, "/v1/processes/close-flow/io");
+  const chunkSize = 600 * 1024;
+  const chunk = "x".repeat(chunkSize);
+  webSockets.once("connection", (socket) => {
+    socket.send(JSON.stringify({
+      type: "connected",
+      processId: "close-flow",
+      stdinSequence: 0,
+      stdoutOffset: chunkSize,
+      stderrOffset: chunkSize,
+    }));
+    socket.send(outputFrame(0x01, 0, chunk));
+    socket.send(outputFrame(0x02, 0, chunk));
+  });
+
+  const attachment = await managedProcesses({
+    baseUrl: `http://127.0.0.1:${address.port}`,
+  }).attach("close-flow", {
+    stdinSequence: 0,
+    stdoutOffset: 0,
+    stderrOffset: 0,
+  });
+  await attachment.connected;
+  await flow.paused;
+  attachment.close();
+  assert.equal(flow.resumeCount, 1);
+  assert.deepEqual(flow.actions, ["pause", "resume", "close"]);
+});
+
 test("managed process attachment treats stdin acknowledgements as cumulative", { timeout: 5_000 }, async (t) => {
   const server = createServer();
   const webSockets = new WebSocketServer({ server });

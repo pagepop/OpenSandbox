@@ -138,7 +138,7 @@ class ManagedProcessAttachmentImpl implements ManagedProcessAttachment {
           ? signal.reason
           : new Error("Managed process attachment aborted");
         this.fail(reason);
-        socket.close(NORMAL_CLOSE, "aborted");
+        this.closeSocket(NORMAL_CLOSE, "aborted");
       };
       if (signal.aborted) this.abortListener();
       else signal.addEventListener("abort", this.abortListener, { once: true });
@@ -207,7 +207,7 @@ class ManagedProcessAttachmentImpl implements ManagedProcessAttachment {
   }
 
   close(): void {
-    this.socket.close(NORMAL_CLOSE);
+    this.closeSocket(NORMAL_CLOSE);
   }
 
   private receive(data: RawData, isBinary: boolean): void {
@@ -355,7 +355,7 @@ class ManagedProcessAttachmentImpl implements ManagedProcessAttachment {
 
   private protocolFailure(reason: unknown): void {
     this.fail(reason);
-    this.socket.close(POLICY_VIOLATION_CLOSE, "invalid managed process frame");
+    this.closeSocket(POLICY_VIOLATION_CLOSE, "invalid managed process frame");
   }
 
   private updateReceiveFlow(): void {
@@ -367,6 +367,14 @@ class ManagedProcessAttachmentImpl implements ManagedProcessAttachment {
       this.receivePaused = false;
       this.socket.resume();
     }
+  }
+
+  private closeSocket(code: number, reason?: string): void {
+    if (this.receivePaused) {
+      this.receivePaused = false;
+      this.socket.resume();
+    }
+    this.socket.close(code, reason);
   }
 
   private fail(reason: unknown, normal = false): void {

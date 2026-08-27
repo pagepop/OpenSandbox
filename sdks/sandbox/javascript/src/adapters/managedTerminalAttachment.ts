@@ -122,7 +122,7 @@ class ManagedTerminalAttachmentImpl implements ManagedTerminalAttachment {
           ? signal.reason
           : new Error("Managed terminal attachment aborted");
         this.fail(reason);
-        socket.close(NORMAL_CLOSE, "aborted");
+        this.closeSocket(NORMAL_CLOSE, "aborted");
       };
       if (signal.aborted) this.abortListener();
       else signal.addEventListener("abort", this.abortListener, { once: true });
@@ -151,7 +151,7 @@ class ManagedTerminalAttachmentImpl implements ManagedTerminalAttachment {
   }
 
   close(): void {
-    this.socket.close(NORMAL_CLOSE);
+    this.closeSocket(NORMAL_CLOSE);
   }
 
   private async send(data: Uint8Array | string): Promise<void> {
@@ -255,7 +255,7 @@ class ManagedTerminalAttachmentImpl implements ManagedTerminalAttachment {
 
   private protocolFailure(reason: unknown): void {
     this.fail(reason);
-    this.socket.close(POLICY_VIOLATION_CLOSE, "invalid managed terminal frame");
+    this.closeSocket(POLICY_VIOLATION_CLOSE, "invalid managed terminal frame");
   }
 
   private updateReceiveFlow(): void {
@@ -267,6 +267,14 @@ class ManagedTerminalAttachmentImpl implements ManagedTerminalAttachment {
       this.receivePaused = false;
       this.socket.resume();
     }
+  }
+
+  private closeSocket(code: number, reason?: string): void {
+    if (this.receivePaused) {
+      this.receivePaused = false;
+      this.socket.resume();
+    }
+    this.socket.close(code, reason);
   }
 
   private fail(reason: unknown, normal = false): void {
