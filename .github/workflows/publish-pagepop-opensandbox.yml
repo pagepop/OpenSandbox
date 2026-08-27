@@ -1,0 +1,170 @@
+name: Publish PagePop OpenSandbox SDK
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "pagepop/js/sandbox/v0.1.12-pagepop.1"
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  REGISTRY_URL: "https://npm.pkg.github.com"
+  SOURCE_PACKAGE_NAME: "@alibaba-group/opensandbox"
+  SOURCE_PACKAGE_VERSION: "0.1.12"
+  TARGET_PACKAGE_NAME: "@pagepop/opensandbox"
+  TARGET_PACKAGE_VERSION: "0.1.12-pagepop.1"
+
+jobs:
+  publish:
+    name: Publish @pagepop/opensandbox
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Verify release ref
+        run: |
+          if [[ "$GITHUB_EVENT_NAME" == "push" ]]; then
+            EXPECTED_TAG="pagepop/js/sandbox/v${TARGET_PACKAGE_VERSION}"
+            if [[ "$GITHUB_REF_TYPE" != "tag" || "$GITHUB_REF_NAME" != "$EXPECTED_TAG" ]]; then
+              echo "Expected release tag $EXPECTED_TAG, found $GITHUB_REF" >&2
+              exit 1
+            fi
+          fi
+
+      - name: Set up Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: "20"
+          registry-url: ${{ env.REGISTRY_URL }}
+          scope: "@pagepop"
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.0
+          run_install: false
+
+      - name: Install workspace dependencies
+        working-directory: sdks
+        run: pnpm install --frozen-lockfile
+
+      - name: Verify source package manifest
+        run: |
+          node --input-type=module <<'NODE'
+          import { readFileSync } from "node:fs";
+
+          const manifest = JSON.parse(
+            readFileSync("sdks/sandbox/javascript/package.json", "utf8"),
+          );
+          if (
+            manifest.name !== process.env.SOURCE_PACKAGE_NAME ||
+            manifest.version !== process.env.SOURCE_PACKAGE_VERSION
+          ) {
+            throw new Error(
+              `Expected ${process.env.SOURCE_PACKAGE_NAME}@${process.env.SOURCE_PACKAGE_VERSION}, ` +
+                `found ${manifest.name}@${manifest.version}`,
+            );
+          }
+          NODE
+
+      - name: Check and build SDK
+        working-directory: sdks
+        run: |
+          pnpm --filter "$SOURCE_PACKAGE_NAME" run lint
+          pnpm --filter "$SOURCE_PACKAGE_NAME" run typecheck
+          pnpm --filter "$SOURCE_PACKAGE_NAME" run test
+
+      - name: Pack and verify source SDK
+        id: source-pack
+        working-directory: sdks/sandbox/javascript
+        run: |
+          set -euo pipefail
+          SOURCE_PACK_DIR="$RUNNER_TEMP/opensandbox-source-package"
+          mkdir -p "$SOURCE_PACK_DIR"
+          pnpm pack --pack-destination "$SOURCE_PACK_DIR"
+
+          SOURCE_TARBALL="$SOURCE_PACK_DIR/alibaba-group-opensandbox-${SOURCE_PACKAGE_VERSION}.tgz"
+          if [[ ! -f "$SOURCE_TARBALL" ]]; then
+            echo "Expected source tarball $SOURCE_TARBALL" >&2
+            exit 1
+          fi
+          echo "tarball=$SOURCE_TARBALL" >> "$GITHUB_OUTPUT"
+
+      - name: Repack and verify PagePop SDK
+        id: pagepop-pack
+        env:
+          SOURCE_TARBALL: ${{ steps.source-pack.outputs.tarball }}
+        run: |
+          set -euo pipefail
+          STAGE_DIR="$RUNNER_TEMP/pagepop-opensandbox-stage"
+          TARGET_PACK_DIR="$RUNNER_TEMP/pagepop-opensandbox-package"
+          mkdir -p "$STAGE_DIR" "$TARGET_PACK_DIR"
+          tar -xzf "$SOURCE_TARBALL" -C "$STAGE_DIR"
+
+          export STAGED_MANIFEST="$STAGE_DIR/package/package.json"
+          node --input-type=module <<'NODE'
+          import { readFileSync, writeFileSync } from "node:fs";
+
+          const manifest = JSON.parse(readFileSync(process.env.STAGED_MANIFEST, "utf8"));
+          if (
+            manifest.name !== process.env.SOURCE_PACKAGE_NAME ||
+            manifest.version !== process.env.SOURCE_PACKAGE_VERSION
+          ) {
+            throw new Error(
+              `Packed source is ${manifest.name}@${manifest.version}, expected ` +
+                `${process.env.SOURCE_PACKAGE_NAME}@${process.env.SOURCE_PACKAGE_VERSION}`,
+            );
+          }
+          manifest.name = process.env.TARGET_PACKAGE_NAME;
+          manifest.version = process.env.TARGET_PACKAGE_VERSION;
+          manifest.repository = {
+            type: "git",
+            url: `${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}.git`,
+          };
+          manifest.publishConfig = { registry: process.env.REGISTRY_URL };
+          writeFileSync(process.env.STAGED_MANIFEST, `${JSON.stringify(manifest, null, 2)}\n`);
+          NODE
+
+          npm pack "$STAGE_DIR/package" \
+            --ignore-scripts \
+            --pack-destination "$TARGET_PACK_DIR"
+          TARGET_TARBALL="$TARGET_PACK_DIR/pagepop-opensandbox-${TARGET_PACKAGE_VERSION}.tgz"
+          if [[ ! -f "$TARGET_TARBALL" ]]; then
+            echo "Expected PagePop tarball $TARGET_TARBALL" >&2
+            exit 1
+          fi
+          if ! tar -tzf "$TARGET_TARBALL" \
+            package/dist/index.js \
+            package/dist/index.d.ts > /dev/null; then
+            echo "PagePop tarball is missing built SDK output" >&2
+            exit 1
+          fi
+
+          TARGET_MANIFEST="$RUNNER_TEMP/pagepop-opensandbox-package.json"
+          tar -xOf "$TARGET_TARBALL" package/package.json > "$TARGET_MANIFEST"
+          node --input-type=module - "$TARGET_MANIFEST" <<'NODE'
+          import { readFileSync } from "node:fs";
+
+          const manifest = JSON.parse(readFileSync(process.argv[2], "utf8"));
+          if (
+            manifest.name !== process.env.TARGET_PACKAGE_NAME ||
+            manifest.version !== process.env.TARGET_PACKAGE_VERSION ||
+            manifest.publishConfig?.registry !== process.env.REGISTRY_URL
+          ) {
+            throw new Error(
+              `Unexpected PagePop package manifest: ${JSON.stringify(manifest)}`,
+            );
+          }
+          NODE
+          echo "tarball=$TARGET_TARBALL" >> "$GITHUB_OUTPUT"
+
+      - name: Publish PagePop SDK
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: pnpm publish "${{ steps.pagepop-pack.outputs.tarball }}" --no-git-checks
