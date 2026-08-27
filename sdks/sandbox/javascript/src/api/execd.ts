@@ -17,13 +17,13 @@
  * Do not make direct changes to the file.
  */
 
-
 /**
  * NOTE: The session-related path types and operations in this file (e.g. /session, runInSession)
  * are generated from the execd OpenAPI spec. They are not the recommended runtime entry point.
  * Use `sandbox.commands.createSession()`, `sandbox.commands.runInSession()`, and
  * `sandbox.commands.deleteSession()` instead.
  */
+
 export interface paths {
     "/ping": {
         parameters: {
@@ -581,6 +581,246 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/processes/resolve-executable": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Resolve a managed-process executable
+         * @description Resolves and validates an executable using the same scrubbed environment rules as process creation.
+         */
+        post: operations["resolveManagedProcessExecutable"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/processes": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Create a managed process
+         * @description Starts an exact-argv process. Repeating an operation ID with the identical request returns the original process.
+         */
+        post: operations["createManagedProcess"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/processes/{processId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Opaque process identity published by execd */
+                processId: components["parameters"]["ManagedProcessId"];
+            };
+            cookie?: never;
+        };
+        /** Get managed-process status */
+        get: operations["getManagedProcess"];
+        put?: never;
+        post?: never;
+        /** Delete a quiescent managed process */
+        delete: operations["deleteManagedProcess"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/processes/{processId}/terminate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Opaque process identity published by execd */
+                processId: components["parameters"]["ManagedProcessId"];
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Terminate a managed process group
+         * @description Starts or joins idempotent TERM-to-KILL termination and waits for group quiescence.
+         */
+        post: operations["terminateManagedProcess"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/processes/{processId}/io": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Opaque process identity published by execd */
+                processId: components["parameters"]["ManagedProcessId"];
+            };
+            cookie?: never;
+        };
+        /**
+         * Attach managed-process standard I/O
+         * @description Upgrades to the OSEP-0023 WebSocket protocol. Client binary frames are
+         *     `[0x00][uint64 sequence, big-endian][stdin bytes]`; server binary frames are
+         *     `[0x01|0x02][uint64 offset, big-endian][stdout|stderr bytes]`. Text control
+         *     frames publish connected positions, stdin acknowledgements and EOF, output
+         *     gaps and EOF, the direct-process outcome, and protocol errors. A newer
+         *     attachment replaces the prior attachment, which closes with code 4001.
+         */
+        get: operations["attachManagedProcessIO"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/terminals": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Create a managed terminal
+         * @description Allocates a PTY and starts an exact-argv process. Identical operation retries return the original terminal.
+         */
+        post: operations["createManagedTerminal"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/terminals/{terminalId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Opaque terminal identity published by execd */
+                terminalId: components["parameters"]["ManagedTerminalId"];
+            };
+            cookie?: never;
+        };
+        /** Get managed-terminal status */
+        get: operations["getManagedTerminal"];
+        put?: never;
+        post?: never;
+        /** Delete a quiescent managed terminal */
+        delete: operations["deleteManagedTerminal"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/terminals/{terminalId}/terminate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Opaque terminal identity published by execd */
+                terminalId: components["parameters"]["ManagedTerminalId"];
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Terminate a complete managed-terminal session */
+        post: operations["terminateManagedTerminal"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/terminals/{terminalId}/io": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Opaque terminal identity published by execd */
+                terminalId: components["parameters"]["ManagedTerminalId"];
+            };
+            cookie?: never;
+        };
+        /**
+         * Attach managed-terminal input and output
+         * @description Upgrades to the OSEP-0023 terminal WebSocket protocol. Client binary input is
+         *     `[0x00][terminal bytes]`; server binary output is
+         *     `[0x01][uint64 offset, big-endian][terminal bytes]`. A client text resize frame
+         *     contains `type`, `rows`, and `cols`. Server text frames publish connection,
+         *     gaps, output EOF, direct-process exit, and errors.
+         */
+        get: operations["attachManagedTerminalIO"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/terminals/{terminalId}/foreground": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Opaque terminal identity published by execd */
+                terminalId: components["parameters"]["ManagedTerminalId"];
+            };
+            cookie?: never;
+        };
+        /** Inspect the terminal foreground process group */
+        get: operations["getManagedTerminalForeground"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/terminals/{terminalId}/foreground/signal": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Opaque terminal identity published by execd */
+                terminalId: components["parameters"]["ManagedTerminalId"];
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Signal the terminal foreground process group */
+        post: operations["signalManagedTerminalForeground"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/isolated/session": {
         parameters: {
             query?: never;
@@ -592,6 +832,23 @@ export interface paths {
         put?: never;
         /** Create an isolated bash session */
         post: operations["createIsolatedSession"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/isolated/sessions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List isolated sessions */
+        get: operations["listIsolatedSessions"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -622,7 +879,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Get isolated session state */
+        /**
+         * Get isolated session state
+         * @description Returns runtime status plus the creation parameters of the session. A stateless client that only has a session ID (e.g. after a restart) can call this endpoint to rebuild a session handle without needing to have retained the original create request.
+         */
         get: operations["getIsolatedSession"];
         put?: never;
         post?: never;
@@ -642,8 +902,66 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Run code in an isolated session (SSE streaming) */
+        /**
+         * Run code in an isolated session
+         * @description Runs code inside an existing isolated session. Foreground mode (default) streams output via SSE (200). Background mode (`background: true`) starts the command detached and returns a JSON run handle with 202 Accepted for polling status and logs via `/v1/isolated/session/{sessionId}/runs/{runId}` and `.../runs/{runId}/logs`. `timeout_seconds` applies to foreground runs only; background runs are not time-limited (idle GC is suspended while one is active) and are bounded by the session lifetime.
+         */
         post: operations["runInIsolatedSession"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/isolated/session/{sessionId}/runs/{runId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get isolated background run status
+         * @description Returns the lifecycle state of a background run started with
+         *     `background: true` on the run endpoint. Includes the running flag,
+         *     exit code (when finished), error (if any), and start/finish timestamps.
+         *     Run records live as long as their session; they are removed when the
+         *     session is deleted or garbage-collected.
+         */
+        get: operations["getIsolatedRunStatus"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/isolated/session/{sessionId}/runs/{runId}/logs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get isolated background run logs (non-streamed)
+         * @description Returns the combined stdout/stderr of a background run as plain text.
+         *     Supports incremental reads similar to a file seek: pass a byte offset
+         *     via the `cursor` query parameter to fetch output after that position
+         *     and receive the latest tail cursor via the
+         *     `EXECD-ISOLATED-TAIL-CURSOR` response header for the next poll.
+         *     When no cursor is provided, the log is returned from the start. At
+         *     most 16 MiB are returned per request; use the returned cursor to
+         *     fetch the remainder.
+         *     Per-run log retention is capped at 16 MiB: output beyond the cap is
+         *     discarded when the run completes, so clients that need more than the
+         *     first page should drain incrementally while the run is active.
+         *     Response body is plain text so it can be rendered directly in browsers.
+         */
+        get: operations["getIsolatedRunLogs"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -859,6 +1177,127 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        /** @description Environment patch applied over execd's scrubbed base; null removes a name. */
+        ManagedEnvironment: {
+            [key: string]: string | null;
+        };
+        ResolveManagedExecutableRequest: {
+            executable: string;
+            env?: components["schemas"]["ManagedEnvironment"];
+        };
+        ResolveManagedExecutableResponse: {
+            /** @description Validated absolute executable path */
+            path: string;
+        };
+        CreateManagedProcessRequest: {
+            /** @description Caller-generated identity for one idempotent create attempt */
+            operationId: string;
+            /** @description Exact argv vector passed without shell interpretation */
+            argv: string[];
+            /** @description Absolute working directory */
+            cwd: string;
+            env?: components["schemas"]["ManagedEnvironment"];
+            /** @enum {string} */
+            stdin: "pipe";
+            /**
+             * Format: int64
+             * @description Retained stdout bytes; omission uses 1048576.
+             */
+            stdoutRetentionBytes?: number;
+            /**
+             * Format: int64
+             * @description Retained stderr bytes; omission uses 1048576.
+             */
+            stderrRetentionBytes?: number;
+            /**
+             * Format: int64
+             * @description Create-time TERM-to-KILL grace; omission uses 3000.
+             */
+            graceMs?: number;
+        };
+        TerminateManagedRequest: {
+            /**
+             * Format: int64
+             * @description Omission uses the create-time value; zero requests immediate SIGKILL.
+             */
+            graceMs?: number;
+        };
+        ManagedProcessStatus: {
+            processId: string;
+            /**
+             * Format: int32
+             * @description Diagnostic operating-system PID, present after publication
+             */
+            pid?: number;
+            /** @enum {string} */
+            state: "allocating" | "running" | "exited" | "quiescent";
+            /** Format: int32 */
+            exitCode: number | null;
+            signal: string | null;
+            topLevelExited: boolean;
+            treeEmpty: boolean;
+            stdinSequence: number;
+            /** Format: int64 */
+            stdoutOffset: number;
+            /** Format: int64 */
+            stderrOffset: number;
+            /** Format: int64 */
+            stdoutRetainedFrom: number;
+            /** Format: int64 */
+            stderrRetainedFrom: number;
+            stdoutSpillPath: string | null;
+            stderrSpillPath: string | null;
+        };
+        CreateManagedTerminalRequest: {
+            operationId: string;
+            /** @description Exact argv vector passed without shell interpretation */
+            argv: string[];
+            /** @description Absolute working directory */
+            cwd: string;
+            env?: components["schemas"]["ManagedEnvironment"];
+            /** Format: int32 */
+            rows: number;
+            /** Format: int32 */
+            cols: number;
+            /**
+             * Format: int64
+             * @description Create-time TERM-to-KILL grace; omission uses 3000.
+             */
+            graceMs?: number;
+        };
+        ManagedTerminalStatus: {
+            terminalId: string;
+            /**
+             * Format: int32
+             * @description Diagnostic operating-system PID, present after publication
+             */
+            pid?: number;
+            /** @enum {string} */
+            state: "allocating" | "running" | "exited" | "quiescent";
+            /** Format: int32 */
+            exitCode: number | null;
+            signal: string | null;
+            topLevelExited: boolean;
+            treeEmpty: boolean;
+            /** Format: int64 */
+            outputOffset: number;
+            /** Format: int64 */
+            outputRetainedFrom: number;
+            outputEof: boolean;
+        };
+        ManagedTerminalForeground: {
+            /** Format: int32 */
+            processGroup: number;
+            inputWaiting: boolean;
+        };
+        SignalManagedTerminalRequest: {
+            /** @enum {string} */
+            signal: "SIGINT" | "SIGTERM" | "SIGKILL" | "SIGTSTP" | "SIGHUP";
+        };
+        SignalManagedTerminalResponse: {
+            /** Format: int32 */
+            processGroup: number;
+        };
         /** @description Request to create a bash session (optional body; empty treated as defaults) */
         CreateSessionRequest: {
             /**
@@ -1250,18 +1689,36 @@ export interface components {
             profile?: "strict" | "balanced";
             workspace: components["schemas"]["IsolatedWorkspaceSpec"];
             extra_writable?: string[];
+            /** @description Additional host paths bind-mounted into the namespace with an explicit source-to-destination mapping. Unlike extra_writable (which mounts source==destination read-write), each entry may map a distinct destination path and be mounted read-only. The source path of every entry must fall within the configured writable allowlist. */
+            binds?: components["schemas"]["BindMount"][];
             share_net?: boolean;
             env_passthrough?: components["schemas"]["EnvPassthroughSpec"];
             /** Format: uint32 */
             uid?: number;
             /** Format: uint32 */
             gid?: number;
+            /**
+             * @description Controls how user identity is established inside the namespace. "setpriv" (default) uses real setuid via setpriv(1). "userns" creates a user namespace via --unshare-user --disable-userns.
+             * @enum {string}
+             */
+            uid_mode?: "setpriv" | "userns";
             idle_timeout_seconds?: number;
         };
         IsolatedWorkspaceSpec: {
             path: string;
             /** @enum {string} */
             mode?: "rw" | "overlay" | "ro";
+        };
+        BindMount: {
+            /** @description Host path to bind-mount into the namespace. */
+            source: string;
+            /** @description Mount destination inside the namespace. Defaults to source when omitted. */
+            dest?: string;
+            /**
+             * @description When true the mount is read-only (--ro-bind); otherwise it is read-write (--bind).
+             * @default false
+             */
+            readonly: boolean;
         };
         EnvPassthroughSpec: {
             /** @enum {string} */
@@ -1275,12 +1732,97 @@ export interface components {
             created_at?: string;
         };
         IsolatedRunRequest: {
+            /**
+             * @description Shell code to execute inside the session
+             * @example echo hello
+             */
             code: string;
+            /** @description Environment variables exported into the shell before the code runs */
             envs?: {
                 [key: string]: string;
             };
+            /**
+             * @description Foreground-only timeout. The run is interrupted after this many
+             *     seconds. Ignored for background runs: a background run is not
+             *     time-limited, and idle GC is suspended while it is active, so a
+             *     long-running background command keeps the session alive until it
+             *     finishes (then the normal idle window applies) or the session is
+             *     deleted.
+             * @example 60
+             */
             timeout_seconds?: number;
+            /**
+             * @description When true (default false), start the code detached inside the
+             *     session and return a 202 run handle instead of streaming output.
+             *     The run's combined stdout/stderr is captured to a log file that
+             *     can be polled via the run logs endpoint; its lifecycle is tracked
+             *     via the run status endpoint.
+             *     Background runs share the session's process group, so session-
+             *     level signals (for example the SIGINT sent when a foreground run
+             *     times out or is cancelled) also reach them; execd cannot signal
+             *     individual in-namespace processes.
+             *     Background runs require a writable log location, so sessions with
+             *     a read-only (`ro`) workspace reject them with 400: there is no
+             *     host-visible writable location for the run's log and exit-code
+             *     files. rw and overlay workspaces are supported.
+             * @example false
+             */
+            background?: boolean;
         };
+        /** @description Handle returned when a run is started with background: true */
+        IsolatedBackgroundRunResponse: {
+            /**
+             * Format: uuid
+             * @description Session the run was started in
+             */
+            session_id: string;
+            /**
+             * Format: uuid
+             * @description Run ID for status and logs polling
+             */
+            run_id: string;
+            /**
+             * Format: date-time
+             * @description Run start time in RFC3339 format
+             */
+            started_at: string;
+        };
+        /** @description Lifecycle state of an isolated background run */
+        IsolatedRunStatus: {
+            /** Format: uuid */
+            session_id: string;
+            /** Format: uuid */
+            run_id: string;
+            /**
+             * @description Whether the run is still executing
+             * @example false
+             */
+            running: boolean;
+            /**
+             * Format: int32
+             * @description Exit code of the code if the run has finished
+             * @example 0
+             */
+            exit_code?: number | null;
+            /**
+             * @description Error message if the run failed (e.g. session terminated)
+             * @example session terminated
+             */
+            error?: string;
+            /**
+             * Format: date-time
+             * @description Run start time in RFC3339 format
+             * @example 2025-12-22T09:08:05Z
+             */
+            started_at: string;
+            /**
+             * Format: date-time
+             * @description Run finish time in RFC3339 format (null if still running)
+             * @example 2025-12-22T09:08:09Z
+             */
+            finished_at?: string | null;
+        };
+        /** @description State of an isolated session. Runtime status fields (status, created_at, last_run_at, idle_remaining_seconds) are always present. Creation-parameter fields (profile, workspace, binds, share_net, env_passthrough, uid, gid, uid_mode, extra_writable, idle_timeout_seconds) echo the parameters used to create the session and let a stateless client rebuild a session handle from just a session ID (e.g. after a client restart or in serverless workers). Older execd builds may omit the creation-parameter fields; clients must tolerate them being absent. */
         SessionState: {
             /** @enum {string} */
             status?: "active" | "dead" | "destroyed";
@@ -1289,6 +1831,37 @@ export interface components {
             /** Format: date-time */
             last_run_at?: string;
             idle_remaining_seconds?: number | null;
+            /**
+             * @description Profile the session was created with.
+             * @enum {string}
+             */
+            profile?: "strict" | "balanced";
+            workspace?: components["schemas"]["IsolatedWorkspaceSpec"];
+            extra_writable?: string[];
+            binds?: components["schemas"]["BindMount"][];
+            share_net?: boolean;
+            env_passthrough?: components["schemas"]["EnvPassthroughSpec"];
+            /** Format: uint32 */
+            uid?: number;
+            /** Format: uint32 */
+            gid?: number;
+            /** @enum {string} */
+            uid_mode?: "setpriv" | "userns";
+            idle_timeout_seconds?: number;
+        };
+        IsolatedSessionSummary: {
+            /** Format: uuid */
+            session_id: string;
+            /** @enum {string} */
+            status: "active" | "dead" | "destroyed";
+            /** Format: date-time */
+            created_at: string;
+            /** Format: date-time */
+            last_run_at: string;
+            idle_remaining_seconds?: number | null;
+        };
+        ListIsolatedSessionsResponse: {
+            sessions: components["schemas"]["IsolatedSessionSummary"][];
         };
         CapabilitiesResponse: {
             available?: boolean;
@@ -1296,12 +1869,58 @@ export interface components {
             version?: string;
             /** @description Diagnostic message when isolation is unavailable */
             message?: string;
+            /** @description Whether sessions using uid_mode setpriv can be created with execd's default UID/GID. Requests that select different UID/GID values may still return 503 NOT_SUPPORTED when identity switching is unavailable. */
+            setpriv_available?: boolean;
+            /** @description Whether sessions using uid_mode userns can be created */
+            userns_available?: boolean;
             commit_supported?: boolean;
             diff_supported?: boolean;
+            /** @description execd init-mode and workload-hardening state (OSEP-0018): whether execd is the sandbox init and which of its controls are in effect. Not an isolation capability; reported here so operators see enforcement state in one place. */
+            hardening?: {
+                /**
+                 * @description How execd supervises the sandbox process tree. pid1: execd is the kernel init of the container. subreaper: execd reaps orphans but lacks the PID 1 kernel signal shield. none: init mode is off (default).
+                 * @enum {string}
+                 */
+                init_mode?: "pid1" | "subreaper" | "none";
+                /** @description Whether the kernel PID 1 signal shield protects execd from in-namespace signals (true only in init_mode pid1). */
+                signal_shield?: boolean;
+                /** @description Capability/bounding-set reduction on user code. */
+                cap_drop?: components["schemas"]["HardeningLayerState"];
+                /** @description Seccomp floor installed on user code. */
+                seccomp?: components["schemas"]["HardeningLayerState"];
+                /** @description Landlock filesystem confinement on user code. */
+                landlock?: components["schemas"]["HardeningLayerState"];
+                /** @description eBPF exec/connect/privilege observation. */
+                ebpf?: components["schemas"]["HardeningLayerState"];
+            };
+        };
+        /** @description Whether one hardening layer is actually enforced. state is "active" | "disabled" (not configured) | "degraded" (configured but a prerequisite is missing) | "unsupported" (kernel/build cannot provide it). message gives the concrete reason whenever state is not active. */
+        HardeningLayerState: {
+            /** @enum {string} */
+            state?: "active" | "disabled" | "degraded" | "unsupported";
+            message?: string;
         };
     };
     responses: {
-        /** @description Isolation subsystem is not available */
+        /** @description The request conflicts with the current resource or operation state */
+        Conflict: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["ErrorResponse"];
+            };
+        };
+        /** @description The requested runtime capability is not supported on this platform */
+        NotImplemented: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["ErrorResponse"];
+            };
+        };
+        /** @description The requested runtime capability or service is not available */
         ServiceUnavailable: {
             headers: {
                 [name: string]: unknown;
@@ -1356,7 +1975,12 @@ export interface components {
             };
         };
     };
-    parameters: never;
+    parameters: {
+        /** @description Opaque process identity published by execd */
+        ManagedProcessId: string;
+        /** @description Opaque terminal identity published by execd */
+        ManagedTerminalId: string;
+    };
     requestBodies: never;
     headers: never;
     pathItems: never;
@@ -2273,6 +2897,371 @@ export interface operations {
             500: components["responses"]["InternalServerError"];
         };
     };
+    resolveManagedProcessExecutable: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ResolveManagedExecutableRequest"];
+            };
+        };
+        responses: {
+            /** @description Resolved executable path */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ResolveManagedExecutableResponse"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            501: components["responses"]["NotImplemented"];
+        };
+    };
+    createManagedProcess: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateManagedProcessRequest"];
+            };
+        };
+        responses: {
+            /** @description Existing process returned for an identical operation retry */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ManagedProcessStatus"];
+                };
+            };
+            /** @description Process created */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ManagedProcessStatus"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            409: components["responses"]["Conflict"];
+            500: components["responses"]["InternalServerError"];
+            501: components["responses"]["NotImplemented"];
+            503: components["responses"]["ServiceUnavailable"];
+        };
+    };
+    getManagedProcess: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Opaque process identity published by execd */
+                processId: components["parameters"]["ManagedProcessId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Current process status */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ManagedProcessStatus"];
+                };
+            };
+            404: components["responses"]["NotFound"];
+        };
+    };
+    deleteManagedProcess: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Opaque process identity published by execd */
+                processId: components["parameters"]["ManagedProcessId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Process record and retained output deleted */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    terminateManagedProcess: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Opaque process identity published by execd */
+                processId: components["parameters"]["ManagedProcessId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["TerminateManagedRequest"];
+            };
+        };
+        responses: {
+            /** @description Quiescent process status */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ManagedProcessStatus"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalServerError"];
+        };
+    };
+    attachManagedProcessIO: {
+        parameters: {
+            query: {
+                stdinSequence: number;
+                stdoutOffset: number;
+                stderrOffset: number;
+            };
+            header?: never;
+            path: {
+                /** @description Opaque process identity published by execd */
+                processId: components["parameters"]["ManagedProcessId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description WebSocket attachment established */
+            101: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            400: components["responses"]["BadRequest"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    createManagedTerminal: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateManagedTerminalRequest"];
+            };
+        };
+        responses: {
+            /** @description Existing terminal returned for an identical operation retry */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ManagedTerminalStatus"];
+                };
+            };
+            /** @description Terminal created */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ManagedTerminalStatus"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            409: components["responses"]["Conflict"];
+            500: components["responses"]["InternalServerError"];
+            501: components["responses"]["NotImplemented"];
+            503: components["responses"]["ServiceUnavailable"];
+        };
+    };
+    getManagedTerminal: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Opaque terminal identity published by execd */
+                terminalId: components["parameters"]["ManagedTerminalId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Current terminal status */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ManagedTerminalStatus"];
+                };
+            };
+            404: components["responses"]["NotFound"];
+        };
+    };
+    deleteManagedTerminal: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Opaque terminal identity published by execd */
+                terminalId: components["parameters"]["ManagedTerminalId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Terminal record and retained output deleted */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    terminateManagedTerminal: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Opaque terminal identity published by execd */
+                terminalId: components["parameters"]["ManagedTerminalId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["TerminateManagedRequest"];
+            };
+        };
+        responses: {
+            /** @description Quiescent terminal status after output drain */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ManagedTerminalStatus"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalServerError"];
+        };
+    };
+    attachManagedTerminalIO: {
+        parameters: {
+            query: {
+                outputOffset: number;
+            };
+            header?: never;
+            path: {
+                /** @description Opaque terminal identity published by execd */
+                terminalId: components["parameters"]["ManagedTerminalId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description WebSocket attachment established */
+            101: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            400: components["responses"]["BadRequest"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    getManagedTerminalForeground: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Opaque terminal identity published by execd */
+                terminalId: components["parameters"]["ManagedTerminalId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Foreground process-group facts */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ManagedTerminalForeground"];
+                };
+            };
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            500: components["responses"]["InternalServerError"];
+        };
+    };
+    signalManagedTerminalForeground: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Opaque terminal identity published by execd */
+                terminalId: components["parameters"]["ManagedTerminalId"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SignalManagedTerminalRequest"];
+            };
+        };
+        responses: {
+            /** @description Signal delivered to the reported process group */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SignalManagedTerminalResponse"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            500: components["responses"]["InternalServerError"];
+        };
+    };
     createIsolatedSession: {
         parameters: {
             query?: never;
@@ -2296,6 +3285,27 @@ export interface operations {
                 };
             };
             400: components["responses"]["BadRequest"];
+            503: components["responses"]["ServiceUnavailable"];
+        };
+    };
+    listIsolatedSessions: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description List of active isolated sessions */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ListIsolatedSessionsResponse"];
+                };
+            };
             503: components["responses"]["ServiceUnavailable"];
         };
     };
@@ -2380,13 +3390,93 @@ export interface operations {
             };
         };
         responses: {
-            /** @description SSE stream of execution output */
+            /** @description SSE stream of execution events (foreground runs only) */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
                     "text/event-stream": components["schemas"]["ServerStreamEvent"];
+                };
+            };
+            /** @description JSON run handle for background runs (background: true). The run was accepted and started detached; poll status and logs via `/v1/isolated/session/{sessionId}/runs/{runId}`. */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["IsolatedBackgroundRunResponse"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            404: components["responses"]["NotFound"];
+            503: components["responses"]["ServiceUnavailable"];
+        };
+    };
+    getIsolatedRunStatus: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                sessionId: string;
+                /** @description Run ID returned by the background run endpoint */
+                runId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Background run status */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["IsolatedRunStatus"];
+                };
+            };
+            404: components["responses"]["NotFound"];
+            503: components["responses"]["ServiceUnavailable"];
+        };
+    };
+    getIsolatedRunLogs: {
+        parameters: {
+            query?: {
+                /**
+                 * @description Optional byte offset (behaves like a file seek). When provided,
+                 *     only log bytes after this offset are returned. The response
+                 *     includes the latest offset (`EXECD-ISOLATED-TAIL-CURSOR`) so the
+                 *     client can request incremental output on subsequent calls.
+                 *     At most 16 MiB are returned per request.
+                 *     If omitted, the log is returned from the start.
+                 * @example 120
+                 */
+                cursor?: number;
+            };
+            header?: never;
+            path: {
+                sessionId: string;
+                /** @description Run ID returned by the background run endpoint */
+                runId: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Background run log (plain text) and tail cursor via header */
+            200: {
+                headers: {
+                    /** @description Highest available byte offset after applying the request cursor (use as the next cursor for incremental reads) */
+                    "EXECD-ISOLATED-TAIL-CURSOR"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    /**
+                     * @example line1
+                     *     line2
+                     *     warn: something on stderr
+                     */
+                    "text/plain": string;
                 };
             };
             400: components["responses"]["BadRequest"];

@@ -20,6 +20,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"github.com/gorilla/websocket"
 )
 
 // ConnectionConfig holds the configuration for connecting to an OpenSandbox server.
@@ -50,6 +52,11 @@ type ConnectionConfig struct {
 	// HTTPClient is an optional custom HTTP client. If nil, a default is created.
 	HTTPClient *http.Client
 
+	// WebSocketDialer optionally configures managed process and terminal I/O.
+	// Set it when HTTPClient uses a RoundTripper that cannot be mapped to
+	// Gorilla WebSocket dial settings.
+	WebSocketDialer *websocket.Dialer
+
 	// AuthHeader overrides the default lifecycle auth header name.
 	// Default is "OPEN-SANDBOX-API-KEY". Use "X-API-Key" for proxied deployments.
 	AuthHeader string
@@ -72,6 +79,21 @@ type ConnectionConfig struct {
 	// resolvable from the host machine.
 	// Example: map[string]string{"host.docker.internal": "localhost"}
 	EndpointHostRewrite map[string]string
+
+	// EndpointCacheTTL is how long a cached endpoint stays valid.
+	// Zero means DefaultEndpointCacheTTL (600s).
+	EndpointCacheTTL time.Duration
+
+	// EndpointCacheSize is the maximum number of cached endpoints.
+	// Zero means DefaultEndpointCacheSize (1024).
+	EndpointCacheSize int
+
+	// EndpointCacheDisabled disables endpoint caching entirely.
+	EndpointCacheDisabled bool
+
+	// DisableMetrics skips SDK telemetry (sandbox.create latency reports).
+	// Also honored via OPENSANDBOX_DISABLE_METRICS=1.
+	DisableMetrics bool
 }
 
 // RewriteEndpointURL applies EndpointHostRewrite rules to an endpoint URL
@@ -158,6 +180,9 @@ func (c *ConnectionConfig) clientOpts(includeAuthHeader bool) []Option {
 			Transport: c.Transport.NewTransport(),
 		}))
 	}
+	if c.WebSocketDialer != nil {
+		opts = append(opts, WithWebSocketDialer(c.WebSocketDialer))
+	}
 	if t := c.GetRequestTimeout(); t > 0 {
 		opts = append(opts, WithTimeout(t))
 	}
@@ -174,7 +199,11 @@ func (c *ConnectionConfig) clientOpts(includeAuthHeader bool) []Option {
 // Appends the API version prefix (/v1) to the base URL, as required by
 // NewLifecycleClient and the OpenSandbox lifecycle API spec.
 func (c *ConnectionConfig) lifecycleClient() *LifecycleClient {
-	return NewLifecycleClient(c.GetBaseURL()+"/"+APIVersion, c.GetAPIKey(), c.clientOpts(true)...)
+	var cache *EndpointCache
+	if !c.EndpointCacheDisabled {
+		cache = NewEndpointCache(c.EndpointCacheSize, c.EndpointCacheTTL)
+	}
+	return NewLifecycleClientWithCache(c.GetBaseURL()+"/"+APIVersion, c.GetAPIKey(), cache, c.clientOpts(true)...)
 }
 
 // execdClient creates an ExecdClient for a resolved endpoint. All headers

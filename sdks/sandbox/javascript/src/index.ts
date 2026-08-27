@@ -30,6 +30,7 @@ export { ConnectionConfig } from "./config/connection.js";
 export type { ConnectionConfigOptions, ConnectionProtocol } from "./config/connection.js";
 
 export type {
+  AllocationSummary,
   Credential,
   CredentialAuth,
   CredentialAuthMetadata,
@@ -43,6 +44,8 @@ export type {
   CredentialMetadata,
   CredentialMutationSet,
   CredentialProxyConfig,
+  CredentialSubstitution,
+  CredentialSubstitutionSurface,
   CredentialVaultCreateRequest,
   CredentialVaultPatchRequest,
   CredentialVaultState,
@@ -53,6 +56,7 @@ export type {
   Endpoint,
   Host,
   InlineCredentialSource,
+  LifecycleHook,
   ListSnapshotsParams,
   ListSnapshotsResponse,
   ListSandboxesParams,
@@ -61,6 +65,7 @@ export type {
   NetworkRule,
   NetworkRuleAction,
   OSSFS,
+  PeriodicLifecycleHook,
   PlatformSpec,
   PVC,
   RenewSandboxExpirationRequest,
@@ -70,6 +75,7 @@ export type {
   SnapshotStatus,
   SandboxId,
   SandboxInfo,
+  SandboxLifecycle,
   SandboxMetadataPatch,
   Volume,
 } from "./models/sandboxes.js";
@@ -106,6 +112,48 @@ export type {
   PingResponse,
 } from "./models/execd.js";
 export type { ExecdCommands } from "./services/execdCommands.js";
+export type {
+  CreateManagedProcessRequest,
+  ManagedProcessAttachRequest,
+  ManagedProcessConnected,
+  ManagedProcessEnvironment,
+  ManagedProcessExit,
+  ManagedProcessOutputGap,
+  ManagedProcessReady,
+  ManagedProcessState,
+  ManagedProcessStatus,
+  ManagedProcessStdinMode,
+  ManagedProcessStreamEOF,
+  ResolveExecutableRequest,
+  ResolveExecutableResponse,
+  TerminateManagedProcessRequest,
+} from "./models/managedProcess.js";
+export type {
+  ManagedProcessAttachment,
+  ManagedProcessHandle,
+  ManagedProcesses,
+} from "./services/managedProcesses.js";
+export type {
+  CreateManagedTerminalRequest,
+  ManagedTerminalAttachRequest,
+  ManagedTerminalConnected,
+  ManagedTerminalEnvironment,
+  ManagedTerminalExit,
+  ManagedTerminalForeground,
+  ManagedTerminalOutputEOF,
+  ManagedTerminalOutputGap,
+  ManagedTerminalReady,
+  ManagedTerminalSignal,
+  ManagedTerminalState,
+  ManagedTerminalStatus,
+  SignalManagedTerminalForegroundRequest,
+  TerminateManagedTerminalRequest,
+} from "./models/managedTerminal.js";
+export type {
+  ManagedTerminalAttachment,
+  ManagedTerminalHandle,
+  ManagedTerminals,
+} from "./services/managedTerminals.js";
 
 export type {
   Execution,
@@ -145,13 +193,19 @@ export type {
   WriteEntry,
 } from "./models/filesystem.js";
 export type { SandboxFiles } from "./services/filesystem.js";
-export type { IsolationService, IsolationSession } from "./services/isolatedSessions.js";
+export type { IsolationService, IsolationSession, RunOnceOpts } from "./services/isolatedSessions.js";
 export type {
   CreateIsolatedSessionRequest,
   IsolatedWorkspaceSpec,
   EnvPassthroughSpec,
+  BindMount,
   IsolatedSessionInfo,
   IsolatedSessionState,
   IsolatedRunOpts,
+  IsolatedBackgroundRun,
+  IsolatedRunStatus,
+  IsolatedRunLogs,
   IsolatedCapabilities,
+  IsolatedSessionSummary,
+  ListIsolatedSessionsResponse,
 } from "./models/isolated.js";

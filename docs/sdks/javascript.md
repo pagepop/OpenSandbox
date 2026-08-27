@@ -70,6 +70,33 @@ try {
 }
 ```
 
+## Lifecycle Hooks
+
+Set `lifecycle` in `Sandbox.create`. `preStart` completes before the entrypoint starts, while `periodic` hooks run on their schedules after startup.
+
+```ts
+const sandbox = await Sandbox.create({
+  connectionConfig: config,
+  image: "ubuntu:24.04",
+  lifecycle: {
+    preStart: {
+      command: ["sh", "-c", "echo ready > /tmp/prestart.done"],
+      timeoutSeconds: 120,
+    },
+    periodic: [
+      {
+        name: "checkpoint",
+        schedule: "@every 5m",
+        command: ["sh", "-c", "date -u >> /tmp/checkpoints.log"],
+        timeoutSeconds: 120,
+      },
+    ],
+  },
+});
+```
+
+The Server validates `timeoutSeconds`; `preStart` accepts 1–10800 seconds, while `periodic` accepts 1–300 seconds. Both default to 60 seconds when omitted. See [Lifecycle Hooks](/guides/lifecycle-hooks) for timing, failure behavior, and provider limitations.
+
 ## Usage Examples
 
 ### 1. Lifecycle Management
@@ -138,7 +165,35 @@ await sandbox.commands.run(
 );
 ```
 
-### 4. Comprehensive File Operations
+### 4. Managed Processes and Terminals
+
+`sandbox.processes` starts an exact argv vector without shell parsing and keeps stdin, stdout, and stderr attachable across reconnects. `sandbox.terminals` allocates a PTY with merged byte output, raw input, and resize support. Both `create()` methods return immediately; await `handle.ready` before using the published ID or PID.
+
+If the create transport fails before its success response is completely read, the SDK resends the same request with the same `operationId` once. HTTP errors and caller aborts are not retried.
+
+```ts
+const terminal = sandbox.terminals.create({
+  operationId: crypto.randomUUID(),
+  argv: ["/bin/bash", "-l"],
+  cwd: "/workspace",
+  rows: 40,
+  cols: 120,
+});
+await terminal.ready;
+
+const io = await terminal.attach({ outputOffset: 0 });
+await io.connected;
+await io.write(new TextEncoder().encode("printf 'hello\\n'\nexit\n"));
+for await (const chunk of io.output) {
+  process.stdout.write(chunk);
+}
+```
+
+`terminal.signalForeground()` returns the process-group ID that received the signal.
+
+Raw I/O attachments are a Node.js server-side API because the WebSocket handshake carries execd authentication headers. Retain the attachment offsets for reconnects; a `gap` event reports when requested output has already fallen outside server retention.
+
+### 5. Comprehensive File Operations
 
 Manage files and directories, including read, write, list/search, and delete.
 
@@ -161,7 +216,7 @@ console.log(files.map((f) => f.path));
 await sandbox.files.deleteDirectories(["/tmp/demo"]);
 ```
 
-### 5. Endpoints
+### 6. Endpoints
 
 `getEndpoint()` returns an endpoint **without a scheme** (for example `"localhost:44772"`). Use `getEndpointUrl()` if you want a ready-to-use absolute URL (for example `"http://localhost:44772"`).
 
@@ -170,7 +225,7 @@ const { endpoint } = await sandbox.getEndpoint(44772);
 const url = await sandbox.getEndpointUrl(44772);
 ```
 
-### 6. Volume Mounts
+### 7. Volume Mounts
 
 `volumes` supports `host`, `pvc`, and `ossfs` backends. Each volume must specify exactly one backend.
 
@@ -195,7 +250,7 @@ const sandbox = await Sandbox.create({
 });
 ```
 
-### 7. Sandbox Management (Admin)
+### 8. Sandbox Management (Admin)
 
 Use `SandboxManager` for administrative tasks and finding existing sandboxes.
 
@@ -231,6 +286,7 @@ The `ConnectionConfig` class manages API server connection settings.
 | `debug`                 | Enable basic HTTP debug logging                                                                              | `false`          | -                      |
 | `headers`               | Extra headers applied to every request                                                                       | `{}`             | -                      |
 | `useServerProxy`        | Use sandbox server as proxy for execd/endpoint requests (e.g. when client cannot reach the sandbox directly) | `false`          | -                      |
+| `disableMetrics`        | Disable SDK create-latency telemetry (see [SDK Telemetry](/guides/sdk-telemetry))                          | `false`          | `OPENSANDBOX_DISABLE_METRICS` |
 
 ```ts
 import { ConnectionConfig } from "@alibaba-group/opensandbox";
@@ -330,7 +386,6 @@ await sandbox.credentialVault.create({
       name: "api-token",
       match: {
         schemes: ["https"],
-        ports: [443],
         hosts: ["api.example.com"],
         paths: ["/v1/*"],
       },
@@ -340,8 +395,8 @@ await sandbox.credentialVault.create({
 });
 ```
 
-See [Credential Vault](/guides/credential-vault) for auth types,
-binding guidance, and Git/curl examples.
+See [Credential Vault](/guides/credential-vault) for auth types, binding
+guidance, and Git/curl examples.
 
 ### 5. Resource Cleanup
 

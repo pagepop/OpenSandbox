@@ -19,6 +19,40 @@ import type { paths as ExecdPaths } from "../api/execd.js";
 
 export type ExecdClient = Client<ExecdPaths>;
 
+const transportErrors = new WeakSet<object>();
+
+function markTransportError(error: unknown): void {
+  if (typeof error === "object" && error !== null) {
+    transportErrors.add(error);
+  }
+}
+
+function trackTransportErrors(fetchImpl: typeof fetch): typeof fetch {
+  return async (input, init) => {
+    try {
+      return await fetchImpl(input, init);
+    } catch (error) {
+      markTransportError(error);
+      throw error;
+    }
+  };
+}
+
+/** Reports whether an error came directly from the execd fetch transport. */
+export function isExecdTransportError(error: unknown): boolean {
+  return typeof error === "object" && error !== null && transportErrors.has(error);
+}
+
+/** Reads a response body while preserving transport-failure identity. */
+export async function readExecdResponseText(response: Response): Promise<string> {
+  try {
+    return await response.text();
+  } catch (error) {
+    markTransportError(error);
+    throw error;
+  }
+}
+
 export interface CreateExecdClientOptions {
   /**
    * Base URL to the Execd API (no `/v1` prefix).
@@ -46,6 +80,6 @@ export function createExecdClient(opts: CreateExecdClientOptions): ExecdClient {
   return createClientFn<ExecdPaths>({
     baseUrl: opts.baseUrl,
     headers: opts.headers,
-    fetch: opts.fetch,
+    fetch: trackTransportErrors(opts.fetch ?? globalThis.fetch),
   });
 }
