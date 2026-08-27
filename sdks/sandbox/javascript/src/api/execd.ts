@@ -581,6 +581,246 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/processes/resolve-executable": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Resolve a managed-process executable
+         * @description Resolves and validates an executable using the same scrubbed environment rules as process creation.
+         */
+        post: operations["resolveManagedProcessExecutable"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/processes": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Create a managed process
+         * @description Starts an exact-argv process. Repeating an operation ID with the identical request returns the original process.
+         */
+        post: operations["createManagedProcess"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/processes/{processId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Opaque process identity published by execd */
+                processId: components["parameters"]["ManagedProcessId"];
+            };
+            cookie?: never;
+        };
+        /** Get managed-process status */
+        get: operations["getManagedProcess"];
+        put?: never;
+        post?: never;
+        /** Delete a quiescent managed process */
+        delete: operations["deleteManagedProcess"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/processes/{processId}/terminate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Opaque process identity published by execd */
+                processId: components["parameters"]["ManagedProcessId"];
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Terminate a managed process group
+         * @description Starts or joins idempotent TERM-to-KILL termination and waits for group quiescence.
+         */
+        post: operations["terminateManagedProcess"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/processes/{processId}/io": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Opaque process identity published by execd */
+                processId: components["parameters"]["ManagedProcessId"];
+            };
+            cookie?: never;
+        };
+        /**
+         * Attach managed-process standard I/O
+         * @description Upgrades to the OSEP-0015 WebSocket protocol. Client binary frames are
+         *     `[0x00][uint64 sequence, big-endian][stdin bytes]`; server binary frames are
+         *     `[0x01|0x02][uint64 offset, big-endian][stdout|stderr bytes]`. Text control
+         *     frames publish connected positions, stdin acknowledgements and EOF, output
+         *     gaps and EOF, the direct-process outcome, and protocol errors. A newer
+         *     attachment replaces the prior attachment, which closes with code 4001.
+         */
+        get: operations["attachManagedProcessIO"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/terminals": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Create a managed terminal
+         * @description Allocates a PTY and starts an exact-argv process. Identical operation retries return the original terminal.
+         */
+        post: operations["createManagedTerminal"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/terminals/{terminalId}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Opaque terminal identity published by execd */
+                terminalId: components["parameters"]["ManagedTerminalId"];
+            };
+            cookie?: never;
+        };
+        /** Get managed-terminal status */
+        get: operations["getManagedTerminal"];
+        put?: never;
+        post?: never;
+        /** Delete a quiescent managed terminal */
+        delete: operations["deleteManagedTerminal"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/terminals/{terminalId}/terminate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Opaque terminal identity published by execd */
+                terminalId: components["parameters"]["ManagedTerminalId"];
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Terminate a complete managed-terminal session */
+        post: operations["terminateManagedTerminal"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/terminals/{terminalId}/io": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Opaque terminal identity published by execd */
+                terminalId: components["parameters"]["ManagedTerminalId"];
+            };
+            cookie?: never;
+        };
+        /**
+         * Attach managed-terminal input and output
+         * @description Upgrades to the OSEP-0015 terminal WebSocket protocol. Client binary input is
+         *     `[0x00][terminal bytes]`; server binary output is
+         *     `[0x01][uint64 offset, big-endian][terminal bytes]`. A client text resize frame
+         *     contains `type`, `rows`, and `cols`. Server text frames publish connection,
+         *     gaps, output EOF, direct-process exit, and errors.
+         */
+        get: operations["attachManagedTerminalIO"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/terminals/{terminalId}/foreground": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Opaque terminal identity published by execd */
+                terminalId: components["parameters"]["ManagedTerminalId"];
+            };
+            cookie?: never;
+        };
+        /** Inspect the terminal foreground process group */
+        get: operations["getManagedTerminalForeground"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/terminals/{terminalId}/foreground/signal": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Opaque terminal identity published by execd */
+                terminalId: components["parameters"]["ManagedTerminalId"];
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Signal the terminal foreground process group */
+        post: operations["signalManagedTerminalForeground"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/isolated/session": {
         parameters: {
             query?: never;
@@ -937,6 +1177,123 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        /** @description Environment patch applied over execd's scrubbed base; null removes a name. */
+        ManagedEnvironment: {
+            [key: string]: string | null;
+        };
+        ResolveManagedExecutableRequest: {
+            executable: string;
+            env?: components["schemas"]["ManagedEnvironment"];
+        };
+        ResolveManagedExecutableResponse: {
+            /** @description Validated absolute executable path */
+            path: string;
+        };
+        CreateManagedProcessRequest: {
+            /** @description Caller-generated identity for one idempotent create attempt */
+            operationId: string;
+            /** @description Exact argv vector passed without shell interpretation */
+            argv: string[];
+            /** @description Absolute working directory */
+            cwd: string;
+            env?: components["schemas"]["ManagedEnvironment"];
+            /** @enum {string} */
+            stdin: "pipe";
+            /**
+             * Format: int64
+             * @description Retained stdout bytes; omission uses 1048576.
+             */
+            stdoutRetentionBytes?: number;
+            /**
+             * Format: int64
+             * @description Retained stderr bytes; omission uses 1048576.
+             */
+            stderrRetentionBytes?: number;
+            /**
+             * Format: int64
+             * @description Create-time TERM-to-KILL grace; omission uses 3000.
+             */
+            graceMs?: number;
+        };
+        TerminateManagedRequest: {
+            /**
+             * Format: int64
+             * @description Omission uses the create-time value; zero requests immediate SIGKILL.
+             */
+            graceMs?: number;
+        };
+        ManagedProcessStatus: {
+            processId: string;
+            /**
+             * Format: int32
+             * @description Diagnostic operating-system PID, present after publication
+             */
+            pid?: number;
+            /** @enum {string} */
+            state: "allocating" | "running" | "exited" | "quiescent";
+            /** Format: int32 */
+            exitCode: number | null;
+            signal: string | null;
+            topLevelExited: boolean;
+            treeEmpty: boolean;
+            stdinSequence: number;
+            /** Format: int64 */
+            stdoutOffset: number;
+            /** Format: int64 */
+            stderrOffset: number;
+            /** Format: int64 */
+            stdoutRetainedFrom: number;
+            /** Format: int64 */
+            stderrRetainedFrom: number;
+            stdoutSpillPath: string | null;
+            stderrSpillPath: string | null;
+        };
+        CreateManagedTerminalRequest: {
+            operationId: string;
+            /** @description Exact argv vector passed without shell interpretation */
+            argv: string[];
+            /** @description Absolute working directory */
+            cwd: string;
+            env?: components["schemas"]["ManagedEnvironment"];
+            /** Format: int32 */
+            rows: number;
+            /** Format: int32 */
+            cols: number;
+            /**
+             * Format: int64
+             * @description Create-time TERM-to-KILL grace; omission uses 3000.
+             */
+            graceMs?: number;
+        };
+        ManagedTerminalStatus: {
+            terminalId: string;
+            /**
+             * Format: int32
+             * @description Diagnostic operating-system PID, present after publication
+             */
+            pid?: number;
+            /** @enum {string} */
+            state: "allocating" | "running" | "exited" | "quiescent";
+            /** Format: int32 */
+            exitCode: number | null;
+            signal: string | null;
+            topLevelExited: boolean;
+            treeEmpty: boolean;
+            /** Format: int64 */
+            outputOffset: number;
+            /** Format: int64 */
+            outputRetainedFrom: number;
+            outputEof: boolean;
+        };
+        ManagedTerminalForeground: {
+            /** Format: int32 */
+            processGroup: number;
+            inputWaiting: boolean;
+        };
+        SignalManagedTerminalRequest: {
+            /** @enum {string} */
+            signal: "SIGINT" | "SIGTERM" | "SIGKILL" | "SIGTSTP" | "SIGHUP";
+        };
         /** @description Request to create a bash session (optional body; empty treated as defaults) */
         CreateSessionRequest: {
             /**
@@ -1541,7 +1898,25 @@ export interface components {
         };
     };
     responses: {
-        /** @description Isolation subsystem is not available */
+        /** @description The request conflicts with the current resource or operation state */
+        Conflict: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["ErrorResponse"];
+            };
+        };
+        /** @description The requested runtime capability is not supported on this platform */
+        NotImplemented: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["ErrorResponse"];
+            };
+        };
+        /** @description The requested runtime capability or service is not available */
         ServiceUnavailable: {
             headers: {
                 [name: string]: unknown;
@@ -1596,7 +1971,12 @@ export interface components {
             };
         };
     };
-    parameters: never;
+    parameters: {
+        /** @description Opaque process identity published by execd */
+        ManagedProcessId: string;
+        /** @description Opaque terminal identity published by execd */
+        ManagedTerminalId: string;
+    };
     requestBodies: never;
     headers: never;
     pathItems: never;
@@ -2510,6 +2890,369 @@ export interface operations {
                     "text/event-stream": components["schemas"]["Metrics"];
                 };
             };
+            500: components["responses"]["InternalServerError"];
+        };
+    };
+    resolveManagedProcessExecutable: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ResolveManagedExecutableRequest"];
+            };
+        };
+        responses: {
+            /** @description Resolved executable path */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ResolveManagedExecutableResponse"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            501: components["responses"]["NotImplemented"];
+        };
+    };
+    createManagedProcess: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateManagedProcessRequest"];
+            };
+        };
+        responses: {
+            /** @description Existing process returned for an identical operation retry */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ManagedProcessStatus"];
+                };
+            };
+            /** @description Process created */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ManagedProcessStatus"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            409: components["responses"]["Conflict"];
+            500: components["responses"]["InternalServerError"];
+            501: components["responses"]["NotImplemented"];
+            503: components["responses"]["ServiceUnavailable"];
+        };
+    };
+    getManagedProcess: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Opaque process identity published by execd */
+                processId: components["parameters"]["ManagedProcessId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Current process status */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ManagedProcessStatus"];
+                };
+            };
+            404: components["responses"]["NotFound"];
+        };
+    };
+    deleteManagedProcess: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Opaque process identity published by execd */
+                processId: components["parameters"]["ManagedProcessId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Process record and retained output deleted */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    terminateManagedProcess: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Opaque process identity published by execd */
+                processId: components["parameters"]["ManagedProcessId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["TerminateManagedRequest"];
+            };
+        };
+        responses: {
+            /** @description Quiescent process status */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ManagedProcessStatus"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalServerError"];
+        };
+    };
+    attachManagedProcessIO: {
+        parameters: {
+            query: {
+                stdinSequence: number;
+                stdoutOffset: number;
+                stderrOffset: number;
+            };
+            header?: never;
+            path: {
+                /** @description Opaque process identity published by execd */
+                processId: components["parameters"]["ManagedProcessId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description WebSocket attachment established */
+            101: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            400: components["responses"]["BadRequest"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    createManagedTerminal: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateManagedTerminalRequest"];
+            };
+        };
+        responses: {
+            /** @description Existing terminal returned for an identical operation retry */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ManagedTerminalStatus"];
+                };
+            };
+            /** @description Terminal created */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ManagedTerminalStatus"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            409: components["responses"]["Conflict"];
+            500: components["responses"]["InternalServerError"];
+            501: components["responses"]["NotImplemented"];
+            503: components["responses"]["ServiceUnavailable"];
+        };
+    };
+    getManagedTerminal: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Opaque terminal identity published by execd */
+                terminalId: components["parameters"]["ManagedTerminalId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Current terminal status */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ManagedTerminalStatus"];
+                };
+            };
+            404: components["responses"]["NotFound"];
+        };
+    };
+    deleteManagedTerminal: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Opaque terminal identity published by execd */
+                terminalId: components["parameters"]["ManagedTerminalId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Terminal record and retained output deleted */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    terminateManagedTerminal: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Opaque terminal identity published by execd */
+                terminalId: components["parameters"]["ManagedTerminalId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["TerminateManagedRequest"];
+            };
+        };
+        responses: {
+            /** @description Quiescent terminal status after output drain */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ManagedTerminalStatus"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalServerError"];
+        };
+    };
+    attachManagedTerminalIO: {
+        parameters: {
+            query: {
+                outputOffset: number;
+            };
+            header?: never;
+            path: {
+                /** @description Opaque terminal identity published by execd */
+                terminalId: components["parameters"]["ManagedTerminalId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description WebSocket attachment established */
+            101: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            400: components["responses"]["BadRequest"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    getManagedTerminalForeground: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Opaque terminal identity published by execd */
+                terminalId: components["parameters"]["ManagedTerminalId"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Foreground process-group facts */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ManagedTerminalForeground"];
+                };
+            };
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            500: components["responses"]["InternalServerError"];
+        };
+    };
+    signalManagedTerminalForeground: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Opaque terminal identity published by execd */
+                terminalId: components["parameters"]["ManagedTerminalId"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SignalManagedTerminalRequest"];
+            };
+        };
+        responses: {
+            /** @description Signal delivered */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            400: components["responses"]["BadRequest"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
             500: components["responses"]["InternalServerError"];
         };
     };

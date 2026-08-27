@@ -20,7 +20,7 @@
 #
 # Usage:
 #   cd components/execd
-#   bash tests/test_sigterm_forward.sh
+#   bash tests/sigterm_forward.sh
 
 set -euo pipefail
 
@@ -29,19 +29,47 @@ BOOTSTRAP="$ROOT_DIR/bootstrap.sh"
 
 TESTDIR="$(mktemp -d)"
 BOOTSTRAP_PID=""
+MARKER_STARTED="$TESTDIR/started"
+MARKER_SIGTERM="$TESTDIR/sigterm_received"
+CMD_PID_FILE="$TESTDIR/cmd_pid"
+EXECD_MARKER_STARTED="$TESTDIR/execd_started"
+EXECD_MARKER_SIGTERM="$TESTDIR/execd_sigterm_received"
+EXECD_PID_FILE="$TESTDIR/execd_pid"
+
 cleanup() {
-    if [ -n "$BOOTSTRAP_PID" ]; then
-        kill -TERM "$BOOTSTRAP_PID" 2>/dev/null || true
-        wait "$BOOTSTRAP_PID" 2>/dev/null || true
-    fi
+    for pid in "${BOOTSTRAP_PID:-}" "${FATAL_BOOTSTRAP_PID:-}"; do
+        [ -n "$pid" ] && kill -KILL "$pid" 2>/dev/null || true
+    done
+    for pid_file in "$CMD_PID_FILE" "$EXECD_PID_FILE" "$TESTDIR"/fatal_workload_pid_*; do
+        if [ -f "$pid_file" ]; then
+            kill -KILL "$(cat "$pid_file")" 2>/dev/null || true
+        fi
+    done
     rm -rf "$TESTDIR"
 }
 trap cleanup EXIT
 
-MARKER_STARTED="$TESTDIR/started"
-MARKER_SIGTERM="$TESTDIR/sigterm_received"
-EXECD_MARKER_STARTED="$TESTDIR/execd_started"
-EXECD_MARKER_SIGTERM="$TESTDIR/execd_sigterm_received"
+wait_for_file() {
+    file="$1"
+    description="$2"
+    for _ in $(seq 1 100); do
+        [ -f "$file" ] && return 0
+        sleep 0.05
+    done
+    echo "FAIL: $description did not occur within 5s"
+    exit 1
+}
+
+wait_for_exit() {
+    pid="$1"
+    description="$2"
+    for _ in $(seq 1 100); do
+        ! kill -0 "$pid" 2>/dev/null && return 0
+        sleep 0.05
+    done
+    echo "FAIL: $description did not exit within 5s"
+    exit 1
+}
 
 # Write test helper: traps SIGTERM, writes marker, then exits.
 # Must use shell builtin loop so bash stays alive as PID and trap can fire.
@@ -51,7 +79,9 @@ cat > "$HELPER" << 'HELPER_SCRIPT'
 #!/bin/bash
 MARKER_STARTED="$1"
 MARKER_SIGTERM="$2"
+PID_FILE="$3"
 trap 'touch "$MARKER_SIGTERM"; exit 0' TERM
+echo $$ > "$PID_FILE"
 touch "$MARKER_STARTED"
 while true; do
     sleep 1
@@ -63,6 +93,7 @@ EXECD_HELPER="$TESTDIR/execd_helper.sh"
 cat > "$EXECD_HELPER" << 'EXECD_HELPER_SCRIPT'
 #!/bin/bash
 trap 'touch "$EXECD_MARKER_SIGTERM"; exit 0' TERM
+echo $$ > "$EXECD_PID_FILE"
 touch "$EXECD_MARKER_STARTED"
 while true; do
     sleep 1
@@ -76,33 +107,26 @@ echo "=== Test: SIGTERM forwarding from bootstrap to child processes ==="
 EXECD="$EXECD_HELPER" \
 EXECD_MARKER_STARTED="$EXECD_MARKER_STARTED" \
 EXECD_MARKER_SIGTERM="$EXECD_MARKER_SIGTERM" \
+EXECD_PID_FILE="$EXECD_PID_FILE" \
 BOOTSTRAP_SHELL="$(command -v bash)" \
-BOOTSTRAP_CMD="$HELPER $MARKER_STARTED $MARKER_SIGTERM" \
+BOOTSTRAP_CMD="$HELPER $MARKER_STARTED $MARKER_SIGTERM $CMD_PID_FILE" \
 bash "$BOOTSTRAP" &
 BOOTSTRAP_PID=$!
 
-# Wait for both child processes to signal they are alive.
-WAIT_OK=""
-for i in $(seq 1 10); do
-    if [ -f "$MARKER_STARTED" ] && [ -f "$EXECD_MARKER_STARTED" ]; then
-        WAIT_OK="yes"
-        break
-    fi
-    sleep 1
-done
-if [ -z "$WAIT_OK" ]; then
-    echo "FAIL: execd or user process did not start within 10s"
-    kill "$BOOTSTRAP_PID" 2>/dev/null || true
-    exit 1
-fi
+wait_for_file "$MARKER_STARTED" "user process startup"
+wait_for_file "$EXECD_MARKER_STARTED" "execd startup"
 echo "OK: execd and user process started (PID: $BOOTSTRAP_PID tree)"
 
 # Simulate K8s: send SIGTERM to bootstrap process
 echo "Sending SIGTERM to bootstrap PID $BOOTSTRAP_PID ..."
 kill -TERM "$BOOTSTRAP_PID"
 
-# Wait for signal propagation and handler execution
-sleep 3
+wait_for_file "$MARKER_SIGTERM" "user process SIGTERM handler"
+wait_for_file "$EXECD_MARKER_SIGTERM" "execd SIGTERM handler"
+wait_for_exit "$BOOTSTRAP_PID" "bootstrap after SIGTERM"
+wait "$BOOTSTRAP_PID"
+BOOTSTRAP_PID=""
+rm -f "$CMD_PID_FILE" "$EXECD_PID_FILE"
 
 # Verify both child processes received SIGTERM.
 if [ -f "$MARKER_SIGTERM" ] && [ -f "$EXECD_MARKER_SIGTERM" ]; then
@@ -122,35 +146,19 @@ else
     exit 1
 fi
 
-wait "$BOOTSTRAP_PID" 2>/dev/null || true
-BOOTSTRAP_PID=""
-
 echo "=== Test: user command exit shuts down execd ==="
 NATURAL_EXECD_STARTED="$TESTDIR/natural_execd_started"
 NATURAL_EXECD_SIGTERM="$TESTDIR/natural_execd_sigterm_received"
 EXECD="$EXECD_HELPER" \
 EXECD_MARKER_STARTED="$NATURAL_EXECD_STARTED" \
 EXECD_MARKER_SIGTERM="$NATURAL_EXECD_SIGTERM" \
+EXECD_PID_FILE="$EXECD_PID_FILE" \
 BOOTSTRAP_SHELL="$(command -v bash)" \
 BOOTSTRAP_CMD='while [ ! -f "$EXECD_MARKER_STARTED" ]; do sleep 0.1; done; exit 7' \
 bash "$BOOTSTRAP" &
 BOOTSTRAP_PID=$!
 
-NATURAL_EXITED=""
-for i in $(seq 1 100); do
-    if ! kill -0 "$BOOTSTRAP_PID" 2>/dev/null; then
-        NATURAL_EXITED="yes"
-        break
-    fi
-    sleep 0.1
-done
-if [ -z "$NATURAL_EXITED" ]; then
-    echo "FAIL: bootstrap did not stop after the user command exited"
-    kill -TERM "$BOOTSTRAP_PID" 2>/dev/null || true
-    wait "$BOOTSTRAP_PID" 2>/dev/null || true
-    BOOTSTRAP_PID=""
-    exit 1
-fi
+wait_for_exit "$BOOTSTRAP_PID" "bootstrap after the user command exited"
 
 set +e
 wait "$BOOTSTRAP_PID"
@@ -167,3 +175,68 @@ if [ ! -f "$NATURAL_EXECD_STARTED" ] || [ ! -f "$NATURAL_EXECD_SIGTERM" ]; then
     exit 1
 fi
 echo "PASS: natural user-command exit preserved status and stopped execd"
+
+echo "=== Test: fatal execd exit does not wait for TERM-ignoring workload ==="
+
+IGNORE_TERM_HELPER="$TESTDIR/ignore_term_helper.sh"
+cat > "$IGNORE_TERM_HELPER" << 'IGNORE_TERM_HELPER_SCRIPT'
+#!/bin/bash
+trap '' TERM
+echo $$ > "$1"
+touch "$2"
+while true; do
+    sleep 1
+done
+IGNORE_TERM_HELPER_SCRIPT
+chmod +x "$IGNORE_TERM_HELPER"
+
+FATAL_EXECD_HELPER="$TESTDIR/fatal_execd_helper.sh"
+cat > "$FATAL_EXECD_HELPER" << 'FATAL_EXECD_HELPER_SCRIPT'
+#!/bin/bash
+while [ ! -f "$FATAL_WORKLOAD_STARTED" ]; do
+    sleep 0.01
+done
+exit "$FATAL_EXECD_STATUS"
+FATAL_EXECD_HELPER_SCRIPT
+chmod +x "$FATAL_EXECD_HELPER"
+
+run_fatal_execd_case() {
+    local execd_status="$1"
+    local expected_status="$2"
+    local name="$3"
+    local workload_started="$TESTDIR/fatal_workload_started_$name"
+    local workload_pid_file="$TESTDIR/fatal_workload_pid_$name"
+
+    EXECD="$FATAL_EXECD_HELPER" \
+    FATAL_EXECD_STATUS="$execd_status" \
+    FATAL_WORKLOAD_STARTED="$workload_started" \
+    BOOTSTRAP_SHELL="$(command -v bash)" \
+    BOOTSTRAP_CMD="$IGNORE_TERM_HELPER $workload_pid_file $workload_started" \
+    bash "$BOOTSTRAP" &
+    FATAL_BOOTSTRAP_PID=$!
+
+    wait_for_file "$workload_started" "TERM-ignoring workload startup"
+    wait_for_exit "$FATAL_BOOTSTRAP_PID" "bootstrap after fatal execd exit"
+    set +e
+    wait "$FATAL_BOOTSTRAP_PID"
+    local bootstrap_status=$?
+    set -e
+    FATAL_BOOTSTRAP_PID=""
+
+    if [ "$bootstrap_status" -ne "$expected_status" ]; then
+        echo "FAIL: expected bootstrap status $expected_status for execd status $execd_status, got $bootstrap_status"
+        exit 1
+    fi
+    local workload_pid
+    workload_pid="$(cat "$workload_pid_file")"
+    if ! kill -0 "$workload_pid" 2>/dev/null; then
+        echo "FAIL: TERM-ignoring workload exited before bootstrap"
+        exit 1
+    fi
+    kill -KILL "$workload_pid" 2>/dev/null || true
+    rm -f "$workload_pid_file"
+    echo "PASS: execd status $execd_status became bootstrap status $expected_status without waiting for the workload"
+}
+
+run_fatal_execd_case 0 1 clean
+run_fatal_execd_case 42 42 nonzero

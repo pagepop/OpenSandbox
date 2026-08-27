@@ -26,6 +26,8 @@ import (
 	"net/http/httptrace"
 	"sync"
 	"time"
+
+	"github.com/gorilla/websocket"
 )
 
 // defaultTimeout is 0 (no global timeout) because a non-zero value kills
@@ -42,13 +44,14 @@ const streamResponseHeaderTimeout = 30 * time.Second
 
 // Client is the base HTTP client shared by LifecycleClient and EgressClient.
 type Client struct {
-	baseURL    string
-	apiKey     string
-	authHeader string
-	httpClient *http.Client
-	timeout    *time.Duration // stored separately, applied after all options
-	headers    map[string]string
-	retry      *RetryConfig
+	baseURL         string
+	apiKey          string
+	authHeader      string
+	httpClient      *http.Client
+	webSocketDialer *websocket.Dialer
+	timeout         *time.Duration // stored separately, applied after all options
+	headers         map[string]string
+	retry           *RetryConfig
 
 	// streamClient is a dedicated HTTP client for SSE streaming, created lazily.
 	// It disables connection pooling/keep-alive and has no overall request
@@ -107,6 +110,15 @@ type Option func(*Client)
 func WithHTTPClient(c *http.Client) Option {
 	return func(cl *Client) {
 		cl.httpClient = c
+	}
+}
+
+// WithWebSocketDialer sets the dialer for managed process and terminal I/O.
+// Use it when the HTTP client has a custom RoundTripper that cannot be mapped
+// to Gorilla WebSocket dial settings.
+func WithWebSocketDialer(dialer *websocket.Dialer) Option {
+	return func(cl *Client) {
+		cl.webSocketDialer = dialer
 	}
 }
 

@@ -112,6 +112,48 @@ export type {
   PingResponse,
 } from "./models/execd.js";
 export type { ExecdCommands } from "./services/execdCommands.js";
+export type {
+  CreateManagedProcessRequest,
+  ManagedProcessAttachRequest,
+  ManagedProcessConnected,
+  ManagedProcessEnvironment,
+  ManagedProcessExit,
+  ManagedProcessOutputGap,
+  ManagedProcessReady,
+  ManagedProcessState,
+  ManagedProcessStatus,
+  ManagedProcessStdinMode,
+  ManagedProcessStreamEOF,
+  ResolveExecutableRequest,
+  ResolveExecutableResponse,
+  TerminateManagedProcessRequest,
+} from "./models/managedProcess.js";
+export type {
+  ManagedProcessAttachment,
+  ManagedProcessHandle,
+  ManagedProcesses,
+} from "./services/managedProcesses.js";
+export type {
+  CreateManagedTerminalRequest,
+  ManagedTerminalAttachRequest,
+  ManagedTerminalConnected,
+  ManagedTerminalEnvironment,
+  ManagedTerminalExit,
+  ManagedTerminalForeground,
+  ManagedTerminalOutputEOF,
+  ManagedTerminalOutputGap,
+  ManagedTerminalReady,
+  ManagedTerminalSignal,
+  ManagedTerminalState,
+  ManagedTerminalStatus,
+  SignalManagedTerminalForegroundRequest,
+  TerminateManagedTerminalRequest,
+} from "./models/managedTerminal.js";
+export type {
+  ManagedTerminalAttachment,
+  ManagedTerminalHandle,
+  ManagedTerminals,
+} from "./services/managedTerminals.js";
 
 export type {
   Execution,

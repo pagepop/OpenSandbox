@@ -168,13 +168,17 @@ func run() int {
 		}()
 	}
 
-	engine := web.NewRouter(flag.ServerAccessToken)
+	processManager := runtime.NewManagedProcessManager()
+	terminalManager := runtime.NewManagedTerminalManager()
+	engine := web.NewRouter(flag.ServerAccessToken, processManager, terminalManager)
 	if err := runHTTPServer(
 		engine,
 		startInitEntrypoint,
 		initStartupCtx,
 		stopInitStartupSignals,
 		lifecycleConfig,
+		processManager,
+		terminalManager,
 	); err != nil {
 		if errors.Is(err, errStartupShutdown) {
 			log.Info("shutdown requested before user entrypoint started: %v", err)
@@ -192,6 +196,8 @@ func runHTTPServer(
 	initStartupCtx context.Context,
 	stopInitStartupSignals context.CancelFunc,
 	lifecycleConfig *lifecycle.Config,
+	processManager *runtime.ManagedProcessManager,
+	terminalManager *runtime.ManagedTerminalManager,
 ) error {
 	addr := fmt.Sprintf(":%d", flag.ServerPort)
 	listener, err := net.Listen("tcp4", addr)
@@ -242,7 +248,15 @@ func runHTTPServer(
 		}
 		return nil
 	}
-	return serveHTTPUntilShutdown(serverCtx, listener, engine, startup)
+	return serveHTTPUntilShutdown(
+		serverCtx,
+		listener,
+		engine,
+		startup,
+		processManager,
+		terminalManager,
+		flag.ApiGracefulShutdownTimeout,
+	)
 }
 
 func startLifecycle(
@@ -361,46 +375,105 @@ func serveHTTPUntilShutdown(
 	listener net.Listener,
 	handler http.Handler,
 	startup func() error,
+	processManager *runtime.ManagedProcessManager,
+	terminalManager *runtime.ManagedTerminalManager,
+	shutdownTimeout time.Duration,
 ) error {
 	server := &http.Server{Handler: handler}
+	return serveExecd(
+		ctx,
+		server,
+		listener,
+		processManager,
+		terminalManager,
+		shutdownTimeout,
+		startup,
+	)
+}
+
+func serveExecd(
+	ctx context.Context,
+	server *http.Server,
+	listener net.Listener,
+	processManager *runtime.ManagedProcessManager,
+	terminalManager *runtime.ManagedTerminalManager,
+	shutdownTimeout time.Duration,
+	startup func() error,
+) error {
 	serveDone := make(chan error, 1)
 	go func() {
 		serveDone <- server.Serve(listener)
 	}()
 	if err := startup(); err != nil {
 		closeErr := server.Close()
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+		shutdownErr := shutdownExecd(shutdownCtx, server, processManager, terminalManager)
+		cancel()
 		serveErr := <-serveDone
 		if errors.Is(serveErr, http.ErrServerClosed) {
 			serveErr = nil
 		}
-		return errors.Join(err, closeErr, serveErr)
+		return errors.Join(err, closeErr, shutdownErr, serveErr)
 	}
 
 	select {
-	case err := <-serveDone:
-		if err == nil || errors.Is(err, http.ErrServerClosed) {
-			return nil
-		}
-		return err
 	case <-ctx.Done():
+		log.Info("received shutdown signal; stopping managed runtimes")
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+		defer cancel()
+		shutdownErr := shutdownExecd(shutdownCtx, server, processManager, terminalManager)
+		if deadlineErr := shutdownCtx.Err(); deadlineErr != nil {
+			closeErr := server.Close()
+			return errors.Join(shutdownErr, closeErr, fmt.Errorf("execd shutdown deadline: %w", deadlineErr))
+		}
+		select {
+		case serveErr := <-serveDone:
+			if serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
+				return errors.Join(shutdownErr, fmt.Errorf("execd server shutdown: %w", serveErr))
+			}
+			return shutdownErr
+		case <-shutdownCtx.Done():
+			closeErr := server.Close()
+			return errors.Join(shutdownErr, closeErr, fmt.Errorf("execd shutdown deadline: %w", shutdownCtx.Err()))
+		}
+	case serveErr := <-serveDone:
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+		defer cancel()
+		shutdownErr := shutdownExecd(shutdownCtx, server, processManager, terminalManager)
+		if deadlineErr := shutdownCtx.Err(); deadlineErr != nil {
+			shutdownErr = errors.Join(
+				shutdownErr,
+				server.Close(),
+				fmt.Errorf("execd shutdown deadline: %w", deadlineErr),
+			)
+		}
+		return errors.Join(fmt.Errorf("execd server stopped unexpectedly: %w", serveErr), shutdownErr)
 	}
+}
 
-	shutdownCtx, cancel := context.WithTimeout(
-		context.Background(),
-		5*time.Second,
-	)
-	defer cancel()
-	if err := server.Shutdown(shutdownCtx); err != nil {
-		closeErr := server.Close()
-		serveErr := <-serveDone
-		return errors.Join(
-			fmt.Errorf("gracefully shut down execd server: %w", err),
-			closeErr,
-			serveErr,
-		)
+func shutdownExecd(
+	ctx context.Context,
+	server *http.Server,
+	processManager *runtime.ManagedProcessManager,
+	terminalManager *runtime.ManagedTerminalManager,
+) error {
+	processDone := make(chan error, 1)
+	terminalDone := make(chan error, 1)
+	go func() { processDone <- processManager.Shutdown(ctx) }()
+	go func() { terminalDone <- terminalManager.Shutdown(ctx) }()
+	processErr := <-processDone
+	terminalErr := <-terminalDone
+	httpErr := server.Shutdown(ctx)
+
+	var shutdownErrs []error
+	if processErr != nil {
+		shutdownErrs = append(shutdownErrs, fmt.Errorf("managed process shutdown: %w", processErr))
 	}
-	if err := <-serveDone; err != nil && !errors.Is(err, http.ErrServerClosed) {
-		return err
+	if terminalErr != nil {
+		shutdownErrs = append(shutdownErrs, fmt.Errorf("managed terminal shutdown: %w", terminalErr))
 	}
-	return nil
+	if httpErr != nil && !errors.Is(httpErr, http.ErrServerClosed) {
+		shutdownErrs = append(shutdownErrs, fmt.Errorf("HTTP server shutdown: %w", httpErr))
+	}
+	return errors.Join(shutdownErrs...)
 }

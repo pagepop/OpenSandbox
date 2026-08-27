@@ -27,6 +27,9 @@ from .command_status_response import CommandStatusResponse
 from .create_isolated_session_request import CreateIsolatedSessionRequest
 from .create_isolated_session_request_profile import CreateIsolatedSessionRequestProfile
 from .create_isolated_session_request_uid_mode import CreateIsolatedSessionRequestUidMode
+from .create_managed_process_request import CreateManagedProcessRequest
+from .create_managed_process_request_stdin import CreateManagedProcessRequestStdin
+from .create_managed_terminal_request import CreateManagedTerminalRequest
 from .create_session_request import CreateSessionRequest
 from .create_session_response import CreateSessionResponse
 from .env_passthrough_spec import EnvPassthroughSpec
@@ -55,6 +58,12 @@ from .isolated_workspace_spec import IsolatedWorkspaceSpec
 from .isolated_workspace_spec_mode import IsolatedWorkspaceSpecMode
 from .list_isolated_sessions_response import ListIsolatedSessionsResponse
 from .make_dirs_body import MakeDirsBody
+from .managed_environment import ManagedEnvironment
+from .managed_process_status import ManagedProcessStatus
+from .managed_process_status_state import ManagedProcessStatusState
+from .managed_terminal_foreground import ManagedTerminalForeground
+from .managed_terminal_status import ManagedTerminalStatus
+from .managed_terminal_status_state import ManagedTerminalStatusState
 from .metrics import Metrics
 from .permission import Permission
 from .rename_file_item import RenameFileItem
@@ -62,6 +71,8 @@ from .replace_content_body import ReplaceContentBody
 from .replace_content_response_200 import ReplaceContentResponse200
 from .replace_file_content_item import ReplaceFileContentItem
 from .replace_file_content_result import ReplaceFileContentResult
+from .resolve_managed_executable_request import ResolveManagedExecutableRequest
+from .resolve_managed_executable_response import ResolveManagedExecutableResponse
 from .run_code_request import RunCodeRequest
 from .run_command_request import RunCommandRequest
 from .run_command_request_envs import RunCommandRequestEnvs
@@ -74,6 +85,9 @@ from .session_state import SessionState
 from .session_state_profile import SessionStateProfile
 from .session_state_status import SessionStateStatus
 from .session_state_uid_mode import SessionStateUidMode
+from .signal_managed_terminal_request import SignalManagedTerminalRequest
+from .signal_managed_terminal_request_signal import SignalManagedTerminalRequestSignal
+from .terminate_managed_request import TerminateManagedRequest
 from .upload_file_body import UploadFileBody
 
 __all__ = (
@@ -88,6 +102,9 @@ __all__ = (
     "CreateIsolatedSessionRequest",
     "CreateIsolatedSessionRequestProfile",
     "CreateIsolatedSessionRequestUidMode",
+    "CreateManagedProcessRequest",
+    "CreateManagedProcessRequestStdin",
+    "CreateManagedTerminalRequest",
     "CreateSessionRequest",
     "CreateSessionResponse",
     "EnvPassthroughSpec",
@@ -116,6 +133,12 @@ __all__ = (
     "IsolatedWorkspaceSpecMode",
     "ListIsolatedSessionsResponse",
     "MakeDirsBody",
+    "ManagedEnvironment",
+    "ManagedProcessStatus",
+    "ManagedProcessStatusState",
+    "ManagedTerminalForeground",
+    "ManagedTerminalStatus",
+    "ManagedTerminalStatusState",
     "Metrics",
     "Permission",
     "RenameFileItem",
@@ -123,6 +146,8 @@ __all__ = (
     "ReplaceContentResponse200",
     "ReplaceFileContentItem",
     "ReplaceFileContentResult",
+    "ResolveManagedExecutableRequest",
+    "ResolveManagedExecutableResponse",
     "RunCodeRequest",
     "RunCommandRequest",
     "RunCommandRequestEnvs",
@@ -135,5 +160,8 @@ __all__ = (
     "SessionStateProfile",
     "SessionStateStatus",
     "SessionStateUidMode",
+    "SignalManagedTerminalRequest",
+    "SignalManagedTerminalRequestSignal",
+    "TerminateManagedRequest",
     "UploadFileBody",
 )

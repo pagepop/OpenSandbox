@@ -20,12 +20,13 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/alibaba/opensandbox/execd/pkg/log"
+	"github.com/alibaba/opensandbox/execd/pkg/runtime"
 	"github.com/alibaba/opensandbox/execd/pkg/web/controller"
 	"github.com/alibaba/opensandbox/execd/pkg/web/model"
 )
 
 // NewRouter builds a Gin engine with all execd routes.
-func NewRouter(accessToken string) *gin.Engine {
+func NewRouter(accessToken string, processManager *runtime.ManagedProcessManager, terminalManager *runtime.ManagedTerminalManager) *gin.Engine {
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
 	r.Use(gin.Recovery())
@@ -92,6 +93,27 @@ func NewRouter(accessToken string) *gin.Engine {
 		pty.GET("/:sessionId/ws", controller.PTYSessionWebSocket)
 	}
 
+	processes := r.Group("/v1/processes")
+	{
+		processes.POST("/resolve-executable", withManagedProcess(processManager, func(c *controller.ManagedProcessController) { c.ResolveExecutable() }))
+		processes.POST("", withManagedProcess(processManager, func(c *controller.ManagedProcessController) { c.Create() }))
+		processes.GET("/:processId", withManagedProcess(processManager, func(c *controller.ManagedProcessController) { c.Get() }))
+		processes.GET("/:processId/io", func(ctx *gin.Context) { controller.ManagedProcessWebSocket(ctx, processManager) })
+		processes.POST("/:processId/terminate", withManagedProcess(processManager, func(c *controller.ManagedProcessController) { c.Terminate() }))
+		processes.DELETE("/:processId", withManagedProcess(processManager, func(c *controller.ManagedProcessController) { c.Delete() }))
+	}
+
+	terminals := r.Group("/v1/terminals")
+	{
+		terminals.POST("", withManagedTerminal(terminalManager, func(c *controller.ManagedTerminalController) { c.Create() }))
+		terminals.GET("/:terminalId", withManagedTerminal(terminalManager, func(c *controller.ManagedTerminalController) { c.Get() }))
+		terminals.GET("/:terminalId/io", func(ctx *gin.Context) { controller.ManagedTerminalWebSocket(ctx, terminalManager) })
+		terminals.GET("/:terminalId/foreground", withManagedTerminal(terminalManager, func(c *controller.ManagedTerminalController) { c.Foreground() }))
+		terminals.POST("/:terminalId/foreground/signal", withManagedTerminal(terminalManager, func(c *controller.ManagedTerminalController) { c.SignalForeground() }))
+		terminals.POST("/:terminalId/terminate", withManagedTerminal(terminalManager, func(c *controller.ManagedTerminalController) { c.Terminate() }))
+		terminals.DELETE("/:terminalId", withManagedTerminal(terminalManager, func(c *controller.ManagedTerminalController) { c.Delete() }))
+	}
+
 	isolated := r.Group("/v1/isolated")
 	{
 		isolated.POST("/session", withIsolated(func(c *controller.IsolatedSessionController) { c.Create() }))
@@ -141,6 +163,18 @@ func withMetric(fn func(*controller.MetricController)) gin.HandlerFunc {
 func withPTY(fn func(*controller.PTYController)) gin.HandlerFunc {
 	return func(ctx *gin.Context) {
 		fn(controller.NewPTYController(ctx))
+	}
+}
+
+func withManagedProcess(manager *runtime.ManagedProcessManager, fn func(*controller.ManagedProcessController)) gin.HandlerFunc {
+	return func(ctx *gin.Context) {
+		fn(controller.NewManagedProcessController(ctx, manager))
+	}
+}
+
+func withManagedTerminal(manager *runtime.ManagedTerminalManager, fn func(*controller.ManagedTerminalController)) gin.HandlerFunc {
+	return func(ctx *gin.Context) {
+		fn(controller.NewManagedTerminalController(ctx, manager))
 	}
 }
 

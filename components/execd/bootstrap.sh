@@ -669,6 +669,31 @@ unset OPENSANDBOX_LIFECYCLE EXECD_LIFECYCLE_CONFIG
 "$@" &
 CMD_PID=$!
 
+# POSIX sh has no portable "wait for either child" primitive. Poll both direct
+# children so an execd exit is fatal while the workload is still alive.
+while kill -0 "$CMD_PID" 2>/dev/null && kill -0 "$EXECD_PID" 2>/dev/null; do
+	if [ "$(_process_state "$CMD_PID")" = "Z" ] \
+		|| [ "$(_process_state "$EXECD_PID")" = "Z" ]; then
+		break
+	fi
+	sleep 1
+done
+
+_execd_state="$(_process_state "$EXECD_PID")"
+if ! kill -0 "$EXECD_PID" 2>/dev/null || [ "$_execd_state" = "Z" ]; then
+	set +e
+	wait "$EXECD_PID" 2>/dev/null
+	_execd_status=$?
+	set -e
+	if kill -0 "$CMD_PID" 2>/dev/null; then
+		_forward_signal TERM "$CMD_PID"
+	fi
+	if [ "$_execd_status" -eq 0 ]; then
+		_execd_status=1
+	fi
+	exit "$_execd_status"
+fi
+
 set +e
 wait "$CMD_PID" 2>/dev/null
 CMD_STATUS=$?

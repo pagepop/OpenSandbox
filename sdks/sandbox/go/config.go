@@ -20,6 +20,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"github.com/gorilla/websocket"
 )
 
 // ConnectionConfig holds the configuration for connecting to an OpenSandbox server.
@@ -49,6 +51,11 @@ type ConnectionConfig struct {
 
 	// HTTPClient is an optional custom HTTP client. If nil, a default is created.
 	HTTPClient *http.Client
+
+	// WebSocketDialer optionally configures managed process and terminal I/O.
+	// Set it when HTTPClient uses a RoundTripper that cannot be mapped to
+	// Gorilla WebSocket dial settings.
+	WebSocketDialer *websocket.Dialer
 
 	// AuthHeader overrides the default lifecycle auth header name.
 	// Default is "OPEN-SANDBOX-API-KEY". Use "X-API-Key" for proxied deployments.
@@ -172,6 +179,9 @@ func (c *ConnectionConfig) clientOpts(includeAuthHeader bool) []Option {
 		opts = append(opts, WithHTTPClient(&http.Client{
 			Transport: c.Transport.NewTransport(),
 		}))
+	}
+	if c.WebSocketDialer != nil {
+		opts = append(opts, WithWebSocketDialer(c.WebSocketDialer))
 	}
 	if t := c.GetRequestTimeout(); t > 0 {
 		opts = append(opts, WithTimeout(t))

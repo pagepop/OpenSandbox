@@ -214,6 +214,20 @@ Created with `NewExecdClient(baseURL, accessToken string, opts ...Option)`.
 | `GetCommandStatus(ctx, commandID)` | Get command execution status |
 | `GetCommandLogs(ctx, commandID, cursor)` | Get command stdout/stderr |
 
+**Managed Processes and Terminals:**
+| Method | Description |
+|--------|-------------|
+| `CreateManagedProcess(ctx, req)` | Start or replay an idempotent exact-argv process create |
+| `AttachManagedProcess(ctx, processID, opts)` | Attach sequenced stdin and retained stdout/stderr over WebSocket |
+| `TerminateManagedProcess(ctx, processID, opts)` | Terminate the complete managed process group |
+| `CreateManagedTerminal(ctx, req)` | Allocate a PTY and start or replay an exact-argv create |
+| `AttachManagedTerminal(ctx, terminalID, opts)` | Attach raw terminal input and retained merged output over WebSocket |
+| `GetManagedTerminalForeground(ctx, terminalID)` | Inspect the current foreground process group |
+| `SignalManagedTerminalForeground(ctx, terminalID, signal)` | Signal the current foreground process group |
+| `TerminateManagedTerminal(ctx, terminalID, opts)` | Terminate the complete terminal session |
+
+`Sandbox.StartManagedProcess` and `Sandbox.StartManagedTerminal` return deferred handles. Wait for `WaitReady` before relying on their opaque ID or diagnostic PID. Attachment reads preserve wire bytes and offsets; callers retain the latest offsets for reconnects and handle reported gaps.
+
 **File Operations:**
 | Method | Description |
 |--------|-------------|
@@ -285,6 +299,15 @@ client := opensandbox.NewLifecycleClient(url, key,
 client := opensandbox.NewExecdClient(url, token,
     opensandbox.WithTimeout(60 * time.Second),
 )
+```
+
+Managed process and terminal WebSocket attachments derive proxy, dial, and TLS settings from a custom `*http.Transport` supplied through `WithHTTPClient`. For another `http.RoundTripper` implementation, also provide `WithWebSocketDialer` explicitly. High-level `Sandbox` users configure the same pairing through `ConnectionConfig`:
+
+```go
+config := opensandbox.ConnectionConfig{
+    HTTPClient:      myHTTPClient,
+    WebSocketDialer: myWebSocketDialer,
+}
 ```
 
 SDK-created HTTP clients enforce NIST 2030 minimum TLS certificate strength by default

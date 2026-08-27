@@ -15,11 +15,14 @@
 package opensandbox
 
 import (
+	"crypto/tls"
 	"errors"
 	"io"
 	"net/http"
 	"strings"
 	"testing"
+
+	"github.com/gorilla/websocket"
 )
 
 type failingReadCloser struct{}
@@ -86,6 +89,24 @@ func TestNewClient_DefaultTransportEnforcesNISTKeylengthPolicy(t *testing.T) {
 	require.True(t, ok, "expected *http.Transport, got %T", client.httpClient.Transport)
 	require.NotNil(t, tr.TLSClientConfig)
 	require.NotNil(t, tr.TLSClientConfig.VerifyConnection)
+}
+
+func TestNewClient_DefaultWebSocketDialerEnforcesHTTPTransportTLSPolicy(t *testing.T) {
+	client := NewClient("https://example.com", "key", "OPEN-SANDBOX-API-KEY")
+	dialer, err := client.newWebSocketDialer()
+	require.NoError(t, err)
+	require.NotNil(t, dialer.TLSClientConfig)
+	require.Equal(t, uint16(tls.VersionTLS12), dialer.TLSClientConfig.MinVersion)
+	require.NotNil(t, dialer.TLSClientConfig.VerifyConnection)
+}
+
+func TestConnectionConfigPropagatesWebSocketDialer(t *testing.T) {
+	configured := &websocket.Dialer{ReadBufferSize: 1234}
+	client := (&ConnectionConfig{WebSocketDialer: configured}).execdClient("https://example.com", nil)
+
+	dialer, err := client.client.newWebSocketDialer()
+	require.NoError(t, err)
+	require.Equal(t, configured.ReadBufferSize, dialer.ReadBufferSize)
 }
 
 func TestNewClient_NilCustomHTTPClientFallsBackToDefaultSecureTransport(t *testing.T) {

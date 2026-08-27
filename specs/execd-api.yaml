@@ -45,6 +45,10 @@ tags:
     description: System resource monitoring and metrics
   - name: IsolatedExecution
     description: Per-session namespace isolation, code execution, and filesystem proxy
+  - name: ManagedProcess
+    description: Exact-argv process lifecycle and raw standard I/O
+  - name: ManagedTerminal
+    description: Exact-argv terminal lifecycle and foreground process control
 
 paths:
   /ping:
@@ -1112,6 +1116,331 @@ paths:
         "500":
           $ref: "#/components/responses/InternalServerError"
 
+  /v1/processes/resolve-executable:
+    post:
+      summary: Resolve a managed-process executable
+      description: Resolves and validates an executable using the same scrubbed environment rules as process creation.
+      operationId: resolveManagedProcessExecutable
+      tags: [ManagedProcess]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ResolveManagedExecutableRequest"
+      responses:
+        "200":
+          description: Resolved executable path
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ResolveManagedExecutableResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "501":
+          $ref: "#/components/responses/NotImplemented"
+
+  /v1/processes:
+    post:
+      summary: Create a managed process
+      description: Starts an exact-argv process. Repeating an operation ID with the identical request returns the original process.
+      operationId: createManagedProcess
+      tags: [ManagedProcess]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateManagedProcessRequest"
+      responses:
+        "201":
+          description: Process created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ManagedProcessStatus"
+        "200":
+          description: Existing process returned for an identical operation retry
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ManagedProcessStatus"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+        "501":
+          $ref: "#/components/responses/NotImplemented"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+
+  /v1/processes/{processId}:
+    parameters:
+      - $ref: "#/components/parameters/ManagedProcessId"
+    get:
+      summary: Get managed-process status
+      operationId: getManagedProcess
+      tags: [ManagedProcess]
+      responses:
+        "200":
+          description: Current process status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ManagedProcessStatus"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    delete:
+      summary: Delete a quiescent managed process
+      operationId: deleteManagedProcess
+      tags: [ManagedProcess]
+      responses:
+        "204":
+          description: Process record and retained output deleted
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+
+  /v1/processes/{processId}/terminate:
+    parameters:
+      - $ref: "#/components/parameters/ManagedProcessId"
+    post:
+      summary: Terminate a managed process group
+      description: Starts or joins idempotent TERM-to-KILL termination and waits for group quiescence.
+      operationId: terminateManagedProcess
+      tags: [ManagedProcess]
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TerminateManagedRequest"
+      responses:
+        "200":
+          description: Quiescent process status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ManagedProcessStatus"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+  /v1/processes/{processId}/io:
+    parameters:
+      - $ref: "#/components/parameters/ManagedProcessId"
+    get:
+      summary: Attach managed-process standard I/O
+      description: |
+        Upgrades to the OSEP-0023 WebSocket protocol. Client binary frames are
+        `[0x00][uint64 sequence, big-endian][stdin bytes]`; server binary frames are
+        `[0x01|0x02][uint64 offset, big-endian][stdout|stderr bytes]`. Text control
+        frames publish connected positions, stdin acknowledgements and EOF, output
+        gaps and EOF, the direct-process outcome, and protocol errors. A newer
+        attachment replaces the prior attachment, which closes with code 4001.
+      operationId: attachManagedProcessIO
+      tags: [ManagedProcess]
+      parameters:
+        - name: stdinSequence
+          in: query
+          required: true
+          schema:
+            type: integer
+            minimum: 0
+        - name: stdoutOffset
+          in: query
+          required: true
+          schema:
+            type: integer
+            format: int64
+            minimum: 0
+        - name: stderrOffset
+          in: query
+          required: true
+          schema:
+            type: integer
+            format: int64
+            minimum: 0
+      responses:
+        "101":
+          description: WebSocket attachment established
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /v1/terminals:
+    post:
+      summary: Create a managed terminal
+      description: Allocates a PTY and starts an exact-argv process. Identical operation retries return the original terminal.
+      operationId: createManagedTerminal
+      tags: [ManagedTerminal]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateManagedTerminalRequest"
+      responses:
+        "201":
+          description: Terminal created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ManagedTerminalStatus"
+        "200":
+          description: Existing terminal returned for an identical operation retry
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ManagedTerminalStatus"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+        "501":
+          $ref: "#/components/responses/NotImplemented"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+
+  /v1/terminals/{terminalId}:
+    parameters:
+      - $ref: "#/components/parameters/ManagedTerminalId"
+    get:
+      summary: Get managed-terminal status
+      operationId: getManagedTerminal
+      tags: [ManagedTerminal]
+      responses:
+        "200":
+          description: Current terminal status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ManagedTerminalStatus"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    delete:
+      summary: Delete a quiescent managed terminal
+      operationId: deleteManagedTerminal
+      tags: [ManagedTerminal]
+      responses:
+        "204":
+          description: Terminal record and retained output deleted
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+
+  /v1/terminals/{terminalId}/terminate:
+    parameters:
+      - $ref: "#/components/parameters/ManagedTerminalId"
+    post:
+      summary: Terminate a complete managed-terminal session
+      operationId: terminateManagedTerminal
+      tags: [ManagedTerminal]
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TerminateManagedRequest"
+      responses:
+        "200":
+          description: Quiescent terminal status after output drain
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ManagedTerminalStatus"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+  /v1/terminals/{terminalId}/io:
+    parameters:
+      - $ref: "#/components/parameters/ManagedTerminalId"
+    get:
+      summary: Attach managed-terminal input and output
+      description: |
+        Upgrades to the OSEP-0023 terminal WebSocket protocol. Client binary input is
+        `[0x00][terminal bytes]`; server binary output is
+        `[0x01][uint64 offset, big-endian][terminal bytes]`. A client text resize frame
+        contains `type`, `rows`, and `cols`. Server text frames publish connection,
+        gaps, output EOF, direct-process exit, and errors.
+      operationId: attachManagedTerminalIO
+      tags: [ManagedTerminal]
+      parameters:
+        - name: outputOffset
+          in: query
+          required: true
+          schema:
+            type: integer
+            format: int64
+            minimum: 0
+      responses:
+        "101":
+          description: WebSocket attachment established
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /v1/terminals/{terminalId}/foreground:
+    parameters:
+      - $ref: "#/components/parameters/ManagedTerminalId"
+    get:
+      summary: Inspect the terminal foreground process group
+      operationId: getManagedTerminalForeground
+      tags: [ManagedTerminal]
+      responses:
+        "200":
+          description: Foreground process-group facts
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ManagedTerminalForeground"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
+  /v1/terminals/{terminalId}/foreground/signal:
+    parameters:
+      - $ref: "#/components/parameters/ManagedTerminalId"
+    post:
+      summary: Signal the terminal foreground process group
+      operationId: signalManagedTerminalForeground
+      tags: [ManagedTerminal]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SignalManagedTerminalRequest"
+      responses:
+        "204":
+          description: Signal delivered
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "500":
+          $ref: "#/components/responses/InternalServerError"
+
   /v1/isolated/session:
     post:
       summary: Create an isolated bash session
@@ -1811,7 +2140,258 @@ components:
         Access token for API authentication. All requests must include this header
         with a valid token. The token is configured during server initialization.
 
+  parameters:
+    ManagedProcessId:
+      name: processId
+      in: path
+      required: true
+      description: Opaque process identity published by execd
+      schema:
+        type: string
+    ManagedTerminalId:
+      name: terminalId
+      in: path
+      required: true
+      description: Opaque terminal identity published by execd
+      schema:
+        type: string
+
   schemas:
+    ManagedEnvironment:
+      type: object
+      description: Environment patch applied over execd's scrubbed base; null removes a name.
+      additionalProperties:
+        oneOf:
+          - type: string
+          - type: "null"
+
+    ResolveManagedExecutableRequest:
+      type: object
+      required: [executable]
+      properties:
+        executable:
+          type: string
+          minLength: 1
+        env:
+          $ref: "#/components/schemas/ManagedEnvironment"
+
+    ResolveManagedExecutableResponse:
+      type: object
+      required: [path]
+      properties:
+        path:
+          type: string
+          description: Validated absolute executable path
+
+    CreateManagedProcessRequest:
+      type: object
+      required: [operationId, argv, cwd, stdin]
+      properties:
+        operationId:
+          type: string
+          minLength: 1
+          description: Caller-generated identity for one idempotent create attempt
+        argv:
+          type: array
+          minItems: 1
+          items:
+            type: string
+          description: Exact argv vector passed without shell interpretation
+        cwd:
+          type: string
+          description: Absolute working directory
+        env:
+          $ref: "#/components/schemas/ManagedEnvironment"
+        stdin:
+          type: string
+          enum: [pipe]
+        stdoutRetentionBytes:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Retained stdout bytes; omission uses 1048576.
+        stderrRetentionBytes:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Retained stderr bytes; omission uses 1048576.
+        graceMs:
+          type: integer
+          format: int64
+          minimum: 0
+          maximum: 9223372036854
+          description: Create-time TERM-to-KILL grace; omission uses 3000.
+
+    TerminateManagedRequest:
+      type: object
+      properties:
+        graceMs:
+          type: integer
+          format: int64
+          minimum: 0
+          maximum: 9223372036854
+          description: Omission uses the create-time value; zero requests immediate SIGKILL.
+
+    ManagedProcessStatus:
+      type: object
+      required:
+        - processId
+        - state
+        - exitCode
+        - signal
+        - topLevelExited
+        - treeEmpty
+        - stdinSequence
+        - stdoutOffset
+        - stderrOffset
+        - stdoutRetainedFrom
+        - stderrRetainedFrom
+        - stdoutSpillPath
+        - stderrSpillPath
+      properties:
+        processId:
+          type: string
+        pid:
+          type: integer
+          format: int32
+          description: Diagnostic operating-system PID, present after publication
+        state:
+          type: string
+          enum: [allocating, running, exited, quiescent]
+        exitCode:
+          type: integer
+          format: int32
+          nullable: true
+        signal:
+          type: string
+          nullable: true
+        topLevelExited:
+          type: boolean
+        treeEmpty:
+          type: boolean
+        stdinSequence:
+          type: integer
+          minimum: 0
+        stdoutOffset:
+          type: integer
+          format: int64
+          minimum: 0
+        stderrOffset:
+          type: integer
+          format: int64
+          minimum: 0
+        stdoutRetainedFrom:
+          type: integer
+          format: int64
+          minimum: 0
+        stderrRetainedFrom:
+          type: integer
+          format: int64
+          minimum: 0
+        stdoutSpillPath:
+          type: string
+          nullable: true
+        stderrSpillPath:
+          type: string
+          nullable: true
+
+    CreateManagedTerminalRequest:
+      type: object
+      required: [operationId, argv, cwd, rows, cols]
+      properties:
+        operationId:
+          type: string
+          minLength: 1
+        argv:
+          type: array
+          minItems: 1
+          items:
+            type: string
+          description: Exact argv vector passed without shell interpretation
+        cwd:
+          type: string
+          description: Absolute working directory
+        env:
+          $ref: "#/components/schemas/ManagedEnvironment"
+        rows:
+          type: integer
+          format: int32
+          minimum: 1
+          maximum: 65535
+        cols:
+          type: integer
+          format: int32
+          minimum: 1
+          maximum: 65535
+        graceMs:
+          type: integer
+          format: int64
+          minimum: 0
+          maximum: 9223372036854
+          description: Create-time TERM-to-KILL grace; omission uses 3000.
+
+    ManagedTerminalStatus:
+      type: object
+      required:
+        - terminalId
+        - state
+        - exitCode
+        - signal
+        - topLevelExited
+        - treeEmpty
+        - outputOffset
+        - outputRetainedFrom
+        - outputEof
+      properties:
+        terminalId:
+          type: string
+        pid:
+          type: integer
+          format: int32
+          description: Diagnostic operating-system PID, present after publication
+        state:
+          type: string
+          enum: [allocating, running, exited, quiescent]
+        exitCode:
+          type: integer
+          format: int32
+          nullable: true
+        signal:
+          type: string
+          nullable: true
+        topLevelExited:
+          type: boolean
+        treeEmpty:
+          type: boolean
+        outputOffset:
+          type: integer
+          format: int64
+          minimum: 0
+        outputRetainedFrom:
+          type: integer
+          format: int64
+          minimum: 0
+        outputEof:
+          type: boolean
+
+    ManagedTerminalForeground:
+      type: object
+      required: [processGroup, inputWaiting]
+      properties:
+        processGroup:
+          type: integer
+          format: int32
+        inputWaiting:
+          type: boolean
+
+    SignalManagedTerminalRequest:
+      type: object
+      required: [signal]
+      properties:
+        signal:
+          type: string
+          enum: [SIGINT, SIGTERM, SIGKILL, SIGTSTP, SIGHUP]
+
     CreateSessionRequest:
       type: object
       description: Request to create a bash session (optional body; empty treated as defaults)
@@ -2575,8 +3155,22 @@ components:
           type: string
 
   responses:
+    Conflict:
+      description: The request conflicts with the current resource or operation state
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+
+    NotImplemented:
+      description: The requested runtime capability is not supported on this platform
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+
     ServiceUnavailable:
-      description: Isolation subsystem is not available
+      description: The requested runtime capability or service is not available
       content:
         application/json:
           schema:
