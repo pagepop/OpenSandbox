@@ -1,7 +1,6 @@
 name: Publish PagePop OpenSandbox SDK
 
 on:
-  workflow_dispatch:
   push:
     tags:
       - "pagepop/js/sandbox/v0.1.12-pagepop.1"
@@ -29,12 +28,10 @@ jobs:
 
       - name: Verify release ref
         run: |
-          if [[ "$GITHUB_EVENT_NAME" == "push" ]]; then
-            EXPECTED_TAG="pagepop/js/sandbox/v${TARGET_PACKAGE_VERSION}"
-            if [[ "$GITHUB_REF_TYPE" != "tag" || "$GITHUB_REF_NAME" != "$EXPECTED_TAG" ]]; then
-              echo "Expected release tag $EXPECTED_TAG, found $GITHUB_REF" >&2
-              exit 1
-            fi
+          EXPECTED_TAG="pagepop/js/sandbox/v${TARGET_PACKAGE_VERSION}"
+          if [[ "$GITHUB_REF_TYPE" != "tag" || "$GITHUB_REF_NAME" != "$EXPECTED_TAG" ]]; then
+            echo "Expected release tag $EXPECTED_TAG, found $GITHUB_REF" >&2
+            exit 1
           fi
 
       - name: Set up Node
@@ -106,8 +103,10 @@ jobs:
           TARGET_PACK_DIR="$RUNNER_TEMP/pagepop-opensandbox-package"
           mkdir -p "$STAGE_DIR" "$TARGET_PACK_DIR"
           tar -xzf "$SOURCE_TARBALL" -C "$STAGE_DIR"
+          cp LICENSE "$STAGE_DIR/package/LICENSE"
 
           export STAGED_MANIFEST="$STAGE_DIR/package/package.json"
+          export STAGED_README="$STAGE_DIR/package/README.md"
           node --input-type=module <<'NODE'
           import { readFileSync, writeFileSync } from "node:fs";
 
@@ -127,8 +126,19 @@ jobs:
             type: "git",
             url: `${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}.git`,
           };
+          manifest.bugs = {
+            url: `${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}/issues`,
+          };
           manifest.publishConfig = { registry: process.env.REGISTRY_URL };
           writeFileSync(process.env.STAGED_MANIFEST, `${JSON.stringify(manifest, null, 2)}\n`);
+
+          const notice =
+            `> **PagePop distribution:** \`${process.env.TARGET_PACKAGE_NAME}@${process.env.TARGET_PACKAGE_VERSION}\` ` +
+            `is sourced from [\`${process.env.GITHUB_REPOSITORY}\`](` +
+            `${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}) and consumed as an npm alias ` +
+            `for \`${process.env.SOURCE_PACKAGE_NAME}\`.`;
+          const readme = readFileSync(process.env.STAGED_README, "utf8");
+          writeFileSync(process.env.STAGED_README, `${notice}\n\n${readme}`);
           NODE
 
           npm pack "$STAGE_DIR/package" \
@@ -141,8 +151,9 @@ jobs:
           fi
           if ! tar -tzf "$TARGET_TARBALL" \
             package/dist/index.js \
-            package/dist/index.d.ts > /dev/null; then
-            echo "PagePop tarball is missing built SDK output" >&2
+            package/dist/index.d.ts \
+            package/LICENSE > /dev/null; then
+            echo "PagePop tarball is missing built SDK output or LICENSE" >&2
             exit 1
           fi
 
@@ -155,7 +166,9 @@ jobs:
           if (
             manifest.name !== process.env.TARGET_PACKAGE_NAME ||
             manifest.version !== process.env.TARGET_PACKAGE_VERSION ||
-            manifest.publishConfig?.registry !== process.env.REGISTRY_URL
+            manifest.publishConfig?.registry !== process.env.REGISTRY_URL ||
+            manifest.bugs?.url !==
+              `${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}/issues`
           ) {
             throw new Error(
               `Unexpected PagePop package manifest: ${JSON.stringify(manifest)}`,
