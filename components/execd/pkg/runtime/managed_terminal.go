@@ -374,27 +374,30 @@ func (t *ManagedTerminal) Foreground() (ManagedTerminalForeground, error) {
 	return ManagedTerminalForeground{ProcessGroup: group, InputWaiting: false}, nil
 }
 
-// SignalForeground sends one supported signal to the active foreground group.
-func (t *ManagedTerminal) SignalForeground(signal ManagedTerminalSignal) error {
+// SignalForeground sends one supported signal and returns the group that received it.
+func (t *ManagedTerminal) SignalForeground(signal ManagedTerminalSignal) (int, error) {
 	if !t.beginOperation() {
-		return ErrManagedTerminalClosing
+		return 0, ErrManagedTerminalClosing
 	}
 	defer t.operations.Done()
 	if t.sessionQuiescent() {
-		return ErrManagedTerminalInactive
+		return 0, ErrManagedTerminalInactive
 	}
 	group, err := foregroundManagedTerminal(t.ptmx, t.pid, t.sessionStart)
 	if err != nil {
 		if errors.Is(err, os.ErrProcessDone) || t.directExited() {
-			return ErrManagedTerminalInactive
+			return 0, ErrManagedTerminalInactive
 		}
-		return err
+		return 0, err
 	}
 	err = signalManagedTerminalForeground(t.pid, t.sessionStart, group, signal)
 	if errors.Is(err, os.ErrProcessDone) {
-		return ErrManagedTerminalInactive
+		return 0, ErrManagedTerminalInactive
 	}
-	return err
+	if err != nil {
+		return 0, err
+	}
+	return group, nil
 }
 
 func (t *ManagedTerminal) directExited() bool {

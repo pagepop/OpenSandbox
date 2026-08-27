@@ -125,9 +125,13 @@ test("ManagedProcessesAdapter maps control routes and deferred publication", asy
 });
 
 test("ManagedProcessesAdapter exposes create failures through ready", async () => {
+  let requestCount = 0;
   const processes = managedProcesses({
     baseUrl: "http://sandbox.test",
-    fetch: async () => new Response("spawn failed", { status: 500 }),
+    fetch: async () => {
+      requestCount += 1;
+      return new Response("operation conflict", { status: 409 });
+    },
   });
 
   const handle = processes.create({
@@ -137,9 +141,85 @@ test("ManagedProcessesAdapter exposes create failures through ready", async () =
     stdin: "pipe",
   });
 
-  await assert.rejects(handle.ready, /Create managed process failed/);
+  await assert.rejects(handle.ready, /operation conflict/);
   assert.equal(handle.processId, undefined);
   assert.equal(handle.pid, undefined);
+  assert.equal(requestCount, 1);
+});
+
+test("ManagedProcessesAdapter recovers an outcome-unknown create once", async () => {
+  const bodies = [];
+  const processes = managedProcesses({
+    baseUrl: "http://sandbox.test",
+    fetch: async (request) => {
+      bodies.push(JSON.parse(await request.text()));
+      if (bodies.length === 1) {
+        throw new TypeError("connection reset after request commit");
+      }
+      return Response.json(processStatus(), { status: 200 });
+    },
+  });
+
+  const request = {
+    operationId: "operation-recover",
+    argv: ["/bin/sleep", "30"],
+    cwd: "/workspace",
+    stdin: "pipe",
+  };
+  const handle = processes.create(request);
+  request.operationId = "mutated-after-create";
+  request.argv.push("mutated");
+
+  assert.deepEqual(await handle.ready, { pid: 4321 });
+  assert.equal(handle.processId, "proc/1");
+  assert.equal(bodies.length, 2);
+  assert.deepEqual(bodies[1], bodies[0]);
+  assert.equal(bodies[1].operationId, "operation-recover");
+});
+
+test("ManagedProcessesAdapter does not recover a caller-aborted create", async () => {
+  const controller = new AbortController();
+  const reason = new Error("cancel create");
+  let requestCount = 0;
+  const processes = managedProcesses({
+    baseUrl: "http://sandbox.test",
+    fetch: async () => {
+      requestCount += 1;
+      controller.abort(reason);
+      throw reason;
+    },
+  });
+
+  const handle = processes.create({
+    operationId: "operation-aborted",
+    argv: ["/bin/true"],
+    cwd: "/workspace",
+    stdin: "pipe",
+  }, controller.signal);
+
+  await assert.rejects(handle.ready, (error) => error === reason);
+  assert.equal(requestCount, 1);
+});
+
+test("ManagedProcessesAdapter recovers a managed create at most once", async () => {
+  let requestCount = 0;
+  const processes = managedProcesses({
+    baseUrl: "http://sandbox.test",
+    fetch: async () => {
+      requestCount += 1;
+      throw new TypeError("connection unavailable");
+    },
+  });
+
+  const handle = processes.create({
+    operationId: "operation-transport-failed",
+    argv: ["/bin/true"],
+    cwd: "/workspace",
+    stdin: "pipe",
+  });
+
+  await assert.rejects(handle.ready, /connection unavailable/);
+  assert.equal(requestCount, 2);
 });
 
 test("ManagedProcessesAdapter rejects a create response without publication facts", async () => {

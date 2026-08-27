@@ -116,6 +116,10 @@ type signalManagedTerminalForegroundWireRequest struct {
 	Signal ManagedTerminalSignal `json:"signal"`
 }
 
+type signalManagedTerminalForegroundWireResponse struct {
+	ProcessGroup int `json:"processGroup"`
+}
+
 func toCreateManagedTerminalWireRequest(request CreateManagedTerminalRequest) createManagedTerminalWireRequest {
 	return createManagedTerminalWireRequest{
 		OperationID:       request.OperationID,
@@ -131,7 +135,7 @@ func toCreateManagedTerminalWireRequest(request CreateManagedTerminalRequest) cr
 // CreateManagedTerminal idempotently allocates a PTY and starts an exact-argv process.
 func (e *ExecdClient) CreateManagedTerminal(ctx context.Context, request CreateManagedTerminalRequest) (*ManagedTerminalStatus, error) {
 	var result ManagedTerminalStatus
-	err := e.client.doRequest(ctx, http.MethodPost, "/v1/terminals", toCreateManagedTerminalWireRequest(request), &result)
+	err := e.client.doManagedCreate(ctx, "/v1/terminals", toCreateManagedTerminalWireRequest(request), &result)
 	if err != nil {
 		return nil, err
 	}
@@ -160,11 +164,15 @@ func (e *ExecdClient) GetManagedTerminalForeground(ctx context.Context, terminal
 	return &result, nil
 }
 
-// SignalManagedTerminalForeground signals the current foreground process group.
-func (e *ExecdClient) SignalManagedTerminalForeground(ctx context.Context, terminalID string, signal ManagedTerminalSignal) error {
+// SignalManagedTerminalForeground signals and returns the current foreground process group.
+func (e *ExecdClient) SignalManagedTerminalForeground(ctx context.Context, terminalID string, signal ManagedTerminalSignal) (int, error) {
 	path := "/v1/terminals/" + url.PathEscape(terminalID) + "/foreground/signal"
 	request := signalManagedTerminalForegroundWireRequest{Signal: signal}
-	return e.client.doRequest(ctx, http.MethodPost, path, request, nil)
+	var result signalManagedTerminalForegroundWireResponse
+	if err := e.client.doRequest(ctx, http.MethodPost, path, request, &result); err != nil {
+		return 0, err
+	}
+	return result.ProcessGroup, nil
 }
 
 // TerminateManagedTerminal starts or joins group termination and waits for quiescence.

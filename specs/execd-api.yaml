@@ -1430,8 +1430,12 @@ paths:
             schema:
               $ref: "#/components/schemas/SignalManagedTerminalRequest"
       responses:
-        "204":
-          description: Signal delivered
+        "200":
+          description: Signal delivered to the reported process group
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SignalManagedTerminalResponse"
         "400":
           $ref: "#/components/responses/BadRequest"
         "404":
@@ -2391,6 +2395,14 @@ components:
         signal:
           type: string
           enum: [SIGINT, SIGTERM, SIGKILL, SIGTSTP, SIGHUP]
+
+    SignalManagedTerminalResponse:
+      type: object
+      required: [processGroup]
+      properties:
+        processGroup:
+          type: integer
+          format: int32
 
     CreateSessionRequest:
       type: object

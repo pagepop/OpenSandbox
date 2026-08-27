@@ -86,7 +86,7 @@ def sync_detailed(
 ) -> Response[Any | ErrorResponse]:
     """Attach managed-terminal input and output
 
-     Upgrades to the OSEP-0015 terminal WebSocket protocol. Client binary input is
+     Upgrades to the OSEP-0023 terminal WebSocket protocol. Client binary input is
     `[0x00][terminal bytes]`; server binary output is
     `[0x01][uint64 offset, big-endian][terminal bytes]`. A client text resize frame
     contains `type`, `rows`, and `cols`. Server text frames publish connection,
@@ -124,7 +124,7 @@ def sync(
 ) -> Any | ErrorResponse | None:
     """Attach managed-terminal input and output
 
-     Upgrades to the OSEP-0015 terminal WebSocket protocol. Client binary input is
+     Upgrades to the OSEP-0023 terminal WebSocket protocol. Client binary input is
     `[0x00][terminal bytes]`; server binary output is
     `[0x01][uint64 offset, big-endian][terminal bytes]`. A client text resize frame
     contains `type`, `rows`, and `cols`. Server text frames publish connection,
@@ -157,7 +157,7 @@ async def asyncio_detailed(
 ) -> Response[Any | ErrorResponse]:
     """Attach managed-terminal input and output
 
-     Upgrades to the OSEP-0015 terminal WebSocket protocol. Client binary input is
+     Upgrades to the OSEP-0023 terminal WebSocket protocol. Client binary input is
     `[0x00][terminal bytes]`; server binary output is
     `[0x01][uint64 offset, big-endian][terminal bytes]`. A client text resize frame
     contains `type`, `rows`, and `cols`. Server text frames publish connection,
@@ -193,7 +193,7 @@ async def asyncio(
 ) -> Any | ErrorResponse | None:
     """Attach managed-terminal input and output
 
-     Upgrades to the OSEP-0015 terminal WebSocket protocol. Client binary input is
+     Upgrades to the OSEP-0023 terminal WebSocket protocol. Client binary input is
     `[0x00][terminal bytes]`; server binary output is
     `[0x01][uint64 offset, big-endian][terminal bytes]`. A client text resize frame
     contains `type`, `rows`, and `cols`. Server text frames publish connection,

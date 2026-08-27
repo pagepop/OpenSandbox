@@ -93,7 +93,7 @@ func TestManagedProcessRoutesAreIdempotentAndAcceptEmptyTerminateBody(t *testing
 	deletedRetry.Body.Close()
 }
 
-func TestManagedTerminalRoutesExposeForegroundAndNoContentMutations(t *testing.T) {
+func TestManagedTerminalRoutesExposeForegroundAndSignalResult(t *testing.T) {
 	processes := runtime.NewManagedProcessManager()
 	terminals := runtime.NewManagedTerminalManager()
 	server := httptest.NewServer(NewRouter("", processes, terminals))
@@ -131,8 +131,12 @@ func TestManagedTerminalRoutesExposeForegroundAndNoContentMutations(t *testing.T
 	invalidSignal.Body.Close()
 
 	signal := managedJSONRequest(t, http.MethodPost, server.URL+"/v1/terminals/"+status.TerminalID+"/foreground/signal", map[string]any{"signal": "SIGINT"})
-	require.Equal(t, http.StatusNoContent, signal.StatusCode)
-	require.Equal(t, int64(0), signal.ContentLength)
+	require.Equal(t, http.StatusOK, signal.StatusCode)
+	var signalBody struct {
+		ProcessGroup int `json:"processGroup"`
+	}
+	require.NoError(t, json.NewDecoder(signal.Body).Decode(&signalBody))
+	require.Equal(t, foregroundBody["processGroup"], float64(signalBody.ProcessGroup))
 	signal.Body.Close()
 
 	terminate, err := http.Post(server.URL+"/v1/terminals/"+status.TerminalID+"/terminate", "application/json", nil)

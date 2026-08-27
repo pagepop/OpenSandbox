@@ -219,11 +219,11 @@ gh attestation verify opensandbox_server-0.1.13*.whl \
 JavaScript packages:
 
 ```bash
-npm pack @alibaba-group/opensandbox@0.1.7
-gh attestation verify alibaba-group-opensandbox-0.1.7.tgz \
+npm pack @alibaba-group/opensandbox@0.1.12
+gh attestation verify alibaba-group-opensandbox-0.1.12.tgz \
   --repo "$REPOSITORY" \
   --signer-workflow "${WORKFLOW_REPOSITORY}/.github/workflows/publish-js-sdks.yml" \
-  --source-ref refs/tags/js/sandbox/v0.1.7
+  --source-ref refs/tags/js/sandbox/v0.1.12
 ```
 
 C# packages:

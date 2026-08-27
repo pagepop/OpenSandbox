@@ -99,6 +99,11 @@ type SignalManagedTerminalRequest struct {
 	Signal string `json:"signal"`
 }
 
+// SignalManagedTerminalResponse identifies the process group that received the signal.
+type SignalManagedTerminalResponse struct {
+	ProcessGroup int `json:"processGroup"`
+}
+
 // Managed WebSocket binary frame tags.
 const (
 	ManagedBinStdin  byte = 0x00

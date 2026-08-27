@@ -248,7 +248,7 @@ func (c *ManagedTerminalController) Foreground() {
 	})
 }
 
-// SignalForeground sends one supported signal to the active foreground group.
+// SignalForeground sends one supported signal and reports the group that received it.
 func (c *ManagedTerminalController) SignalForeground() {
 	var request model.SignalManagedTerminalRequest
 	if err := c.bindJSON(&request); err != nil {
@@ -264,11 +264,12 @@ func (c *ManagedTerminalController) SignalForeground() {
 		c.respondTerminalError(runtime.ErrManagedTerminalNotFound, http.StatusNotFound)
 		return
 	}
-	if err := terminal.SignalForeground(runtime.ManagedTerminalSignal(request.Signal)); err != nil {
+	group, err := terminal.SignalForeground(runtime.ManagedTerminalSignal(request.Signal))
+	if err != nil {
 		c.respondTerminalError(err, http.StatusInternalServerError)
 		return
 	}
-	c.ctx.Status(http.StatusNoContent)
+	c.RespondSuccess(model.SignalManagedTerminalResponse{ProcessGroup: group})
 }
 
 // Terminate starts or joins complete terminal-session termination.

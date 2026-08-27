@@ -50,7 +50,7 @@ test("ManagedTerminalsAdapter maps control routes and deferred publication", asy
       return Response.json({ processGroup: 5432, inputWaiting: true });
     }
     if (request.url.endsWith("/foreground/signal")) {
-      return new Response(null, { status: 204 });
+      return Response.json({ processGroup: 5432 });
     }
     if (request.method === "GET") {
       return Response.json(terminalStatus({ outputOffset: 12 }));
@@ -95,7 +95,7 @@ test("ManagedTerminalsAdapter maps control routes and deferred publication", asy
     processGroup: 5432,
     inputWaiting: true,
   });
-  await handle.signalForeground({ signal: "SIGINT" });
+  assert.equal(await handle.signalForeground({ signal: "SIGINT" }), 5432);
   assert.equal((await handle.terminate({ graceMs: 0 })).treeEmpty, true);
   assert.equal((await handle.terminate()).treeEmpty, true);
   await handle.delete();
@@ -118,9 +118,13 @@ test("ManagedTerminalsAdapter maps control routes and deferred publication", asy
 });
 
 test("ManagedTerminalsAdapter exposes create failures through ready", async () => {
+  let requestCount = 0;
   const terminals = managedTerminals({
     baseUrl: "http://sandbox.test",
-    fetch: async () => new Response("PTY failed", { status: 500 }),
+    fetch: async () => {
+      requestCount += 1;
+      return new Response("PTY failed", { status: 500 });
+    },
   });
   const handle = terminals.create({
     operationId: "operation-failed",
@@ -130,9 +134,47 @@ test("ManagedTerminalsAdapter exposes create failures through ready", async () =
     cols: 80,
   });
 
-  await assert.rejects(handle.ready, /Create managed terminal failed/);
+  await assert.rejects(handle.ready, /PTY failed/);
   assert.equal(handle.terminalId, undefined);
   assert.equal(handle.pid, undefined);
+  assert.equal(requestCount, 1);
+});
+
+test("ManagedTerminalsAdapter recovers an interrupted create response body", async () => {
+  const bodies = [];
+  const terminals = managedTerminals({
+    baseUrl: "http://sandbox.test",
+    fetch: async (request) => {
+      bodies.push(JSON.parse(await request.text()));
+      if (bodies.length === 1) {
+        const body = new ReadableStream({
+          start(stream) {
+            stream.enqueue(new TextEncoder().encode('{"terminalId":"term/1"'));
+            stream.error(new TypeError("response stream interrupted"));
+          },
+        });
+        return new Response(body, {
+          status: 201,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      return Response.json(terminalStatus(), { status: 200 });
+    },
+  });
+
+  const handle = terminals.create({
+    operationId: "operation-recover",
+    argv: ["/bin/bash", "-l"],
+    cwd: "/workspace",
+    rows: 24,
+    cols: 80,
+  });
+
+  assert.deepEqual(await handle.ready, { pid: 5432 });
+  assert.equal(handle.terminalId, "term/1");
+  assert.equal(bodies.length, 2);
+  assert.deepEqual(bodies[1], bodies[0]);
+  assert.equal(bodies[1].operationId, "operation-recover");
 });
 
 test("ManagedTerminalsAdapter rejects a create response without publication facts", async () => {

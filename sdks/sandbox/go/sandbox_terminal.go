@@ -84,11 +84,11 @@ func (h *ManagedTerminalHandle) Foreground(ctx context.Context) (*ManagedTermina
 	return h.client.GetManagedTerminalForeground(ctx, terminalID)
 }
 
-// SignalForeground waits for publication and signals the current foreground process group.
-func (h *ManagedTerminalHandle) SignalForeground(ctx context.Context, signal ManagedTerminalSignal) error {
+// SignalForeground waits for publication, signals, and returns the current foreground process group.
+func (h *ManagedTerminalHandle) SignalForeground(ctx context.Context, signal ManagedTerminalSignal) (int, error) {
 	terminalID, err := h.waitTerminalID(ctx)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	return h.client.SignalManagedTerminalForeground(ctx, terminalID, signal)
 }
@@ -169,10 +169,10 @@ func (s *Sandbox) GetManagedTerminalForeground(ctx context.Context, terminalID s
 	return s.execd.GetManagedTerminalForeground(ctx, terminalID)
 }
 
-// SignalManagedTerminalForeground signals the current foreground group by opaque ID.
-func (s *Sandbox) SignalManagedTerminalForeground(ctx context.Context, terminalID string, signal ManagedTerminalSignal) error {
+// SignalManagedTerminalForeground signals and returns the current foreground group by opaque ID.
+func (s *Sandbox) SignalManagedTerminalForeground(ctx context.Context, terminalID string, signal ManagedTerminalSignal) (int, error) {
 	if s.execd == nil {
-		return fmt.Errorf("opensandbox: execd client not initialized")
+		return 0, fmt.Errorf("opensandbox: execd client not initialized")
 	}
 	return s.execd.SignalManagedTerminalForeground(ctx, terminalID, signal)
 }

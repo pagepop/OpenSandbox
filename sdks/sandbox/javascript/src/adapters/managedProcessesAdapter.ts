@@ -28,6 +28,7 @@ import type {
 } from "../services/managedProcesses.js";
 import type { ExecdClient } from "../openapi/execdClient.js";
 import { waitForPublication } from "./abortablePublication.js";
+import { recoverManagedCreatePublication } from "./managedCreatePublication.js";
 import { openManagedProcessAttachment } from "./managedProcessAttachment.js";
 import { throwOnOpenApiFetchError } from "./openapiError.js";
 
@@ -182,11 +183,14 @@ export class ManagedProcessesAdapter implements ManagedProcesses {
     request: CreateManagedProcessRequest,
     signal?: AbortSignal,
   ): Promise<ManagedProcessStatus> {
-    const { data, error, response } = await this.client.POST(
-      "/v1/processes",
-      { body: request, signal },
+    const body = JSON.stringify(request);
+    return recoverManagedCreatePublication<ManagedProcessStatus>(
+      () => this.client.POST(
+        "/v1/processes",
+        { body: request, bodySerializer: () => body, signal, parseAs: "stream" },
+      ),
+      signal,
+      "Create managed process failed",
     );
-    throwOnOpenApiFetchError({ error, response }, "Create managed process failed");
-    return requireData(data, "Create managed process failed");
   }
 }

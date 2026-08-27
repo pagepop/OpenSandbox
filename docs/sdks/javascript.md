@@ -169,6 +169,8 @@ await sandbox.commands.run(
 
 `sandbox.processes` starts an exact argv vector without shell parsing and keeps stdin, stdout, and stderr attachable across reconnects. `sandbox.terminals` allocates a PTY with merged byte output, raw input, and resize support. Both `create()` methods return immediately; await `handle.ready` before using the published ID or PID.
 
+If the create transport fails before its success response is completely read, the SDK resends the same request with the same `operationId` once. HTTP errors and caller aborts are not retried.
+
 ```ts
 const terminal = sandbox.terminals.create({
   operationId: crypto.randomUUID(),
@@ -186,6 +188,8 @@ for await (const chunk of io.output) {
   process.stdout.write(chunk);
 }
 ```
+
+`terminal.signalForeground()` returns the process-group ID that received the signal.
 
 Raw I/O attachments are a Node.js server-side API because the WebSocket handshake carries execd authentication headers. Retain the attachment offsets for reconnects; a `gap` event reports when requested output has already fallen outside server retention.
 

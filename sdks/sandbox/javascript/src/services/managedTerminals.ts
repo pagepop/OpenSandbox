@@ -51,7 +51,7 @@ export interface ManagedTerminalHandle {
   signalForeground(
     request: SignalManagedTerminalForegroundRequest,
     signal?: AbortSignal,
-  ): Promise<void>;
+  ): Promise<number>;
   terminate(
     request?: TerminateManagedTerminalRequest,
     signal?: AbortSignal,
@@ -78,7 +78,7 @@ export interface ManagedTerminals {
     terminalId: string,
     request: SignalManagedTerminalForegroundRequest,
     signal?: AbortSignal,
-  ): Promise<void>;
+  ): Promise<number>;
   terminate(
     terminalId: string,
     request?: TerminateManagedTerminalRequest,

@@ -147,7 +147,7 @@ const unavailableManagedTerminals: ManagedTerminals = {
       "Managed terminals are not available: the adapter factory did not provide a ManagedTerminals service"
     ));
   },
-  signalForeground(): Promise<void> {
+  signalForeground(): Promise<number> {
     return Promise.reject(new Error(
       "Managed terminals are not available: the adapter factory did not provide a ManagedTerminals service"
     ));

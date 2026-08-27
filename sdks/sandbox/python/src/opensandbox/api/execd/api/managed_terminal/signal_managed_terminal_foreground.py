@@ -15,7 +15,7 @@
 #
 
 from http import HTTPStatus
-from typing import Any, cast
+from typing import Any
 from urllib.parse import quote
 
 import httpx
@@ -24,6 +24,7 @@ from ... import errors
 from ...client import AuthenticatedClient, Client
 from ...models.error_response import ErrorResponse
 from ...models.signal_managed_terminal_request import SignalManagedTerminalRequest
+from ...models.signal_managed_terminal_response import SignalManagedTerminalResponse
 from ...types import Response
 
 
@@ -49,10 +50,13 @@ def _get_kwargs(
     return _kwargs
 
 
-def _parse_response(*, client: AuthenticatedClient | Client, response: httpx.Response) -> Any | ErrorResponse | None:
-    if response.status_code == 204:
-        response_204 = cast(Any, None)
-        return response_204
+def _parse_response(
+    *, client: AuthenticatedClient | Client, response: httpx.Response
+) -> ErrorResponse | SignalManagedTerminalResponse | None:
+    if response.status_code == 200:
+        response_200 = SignalManagedTerminalResponse.from_dict(response.json())
+
+        return response_200
 
     if response.status_code == 400:
         response_400 = ErrorResponse.from_dict(response.json())
@@ -80,7 +84,9 @@ def _parse_response(*, client: AuthenticatedClient | Client, response: httpx.Res
         return None
 
 
-def _build_response(*, client: AuthenticatedClient | Client, response: httpx.Response) -> Response[Any | ErrorResponse]:
+def _build_response(
+    *, client: AuthenticatedClient | Client, response: httpx.Response
+) -> Response[ErrorResponse | SignalManagedTerminalResponse]:
     return Response(
         status_code=HTTPStatus(response.status_code),
         content=response.content,
@@ -94,7 +100,7 @@ def sync_detailed(
     *,
     client: AuthenticatedClient | Client,
     body: SignalManagedTerminalRequest,
-) -> Response[Any | ErrorResponse]:
+) -> Response[ErrorResponse | SignalManagedTerminalResponse]:
     """Signal the terminal foreground process group
 
     Args:
@@ -106,7 +112,7 @@ def sync_detailed(
         httpx.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
-        Response[Any | ErrorResponse]
+        Response[ErrorResponse | SignalManagedTerminalResponse]
     """
 
     kwargs = _get_kwargs(
@@ -126,7 +132,7 @@ def sync(
     *,
     client: AuthenticatedClient | Client,
     body: SignalManagedTerminalRequest,
-) -> Any | ErrorResponse | None:
+) -> ErrorResponse | SignalManagedTerminalResponse | None:
     """Signal the terminal foreground process group
 
     Args:
@@ -138,7 +144,7 @@ def sync(
         httpx.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
-        Any | ErrorResponse
+        ErrorResponse | SignalManagedTerminalResponse
     """
 
     return sync_detailed(
@@ -153,7 +159,7 @@ async def asyncio_detailed(
     *,
     client: AuthenticatedClient | Client,
     body: SignalManagedTerminalRequest,
-) -> Response[Any | ErrorResponse]:
+) -> Response[ErrorResponse | SignalManagedTerminalResponse]:
     """Signal the terminal foreground process group
 
     Args:
@@ -165,7 +171,7 @@ async def asyncio_detailed(
         httpx.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
-        Response[Any | ErrorResponse]
+        Response[ErrorResponse | SignalManagedTerminalResponse]
     """
 
     kwargs = _get_kwargs(
@@ -183,7 +189,7 @@ async def asyncio(
     *,
     client: AuthenticatedClient | Client,
     body: SignalManagedTerminalRequest,
-) -> Any | ErrorResponse | None:
+) -> ErrorResponse | SignalManagedTerminalResponse | None:
     """Signal the terminal foreground process group
 
     Args:
@@ -195,7 +201,7 @@ async def asyncio(
         httpx.TimeoutException: If the request takes longer than Client.timeout.
 
     Returns:
-        Any | ErrorResponse
+        ErrorResponse | SignalManagedTerminalResponse
     """
 
     return (

@@ -149,7 +149,7 @@ func (e *ExecdClient) ResolveExecutable(ctx context.Context, request ResolveExec
 // CreateManagedProcess idempotently starts an exact-argv process.
 func (e *ExecdClient) CreateManagedProcess(ctx context.Context, request CreateManagedProcessRequest) (*ManagedProcessStatus, error) {
 	var result ManagedProcessStatus
-	err := e.client.doRequest(ctx, http.MethodPost, "/v1/processes", toCreateManagedProcessWireRequest(request), &result)
+	err := e.client.doManagedCreate(ctx, "/v1/processes", toCreateManagedProcessWireRequest(request), &result)
 	if err != nil {
 		return nil, err
 	}

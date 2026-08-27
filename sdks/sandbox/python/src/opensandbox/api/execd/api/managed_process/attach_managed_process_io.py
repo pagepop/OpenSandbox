@@ -94,7 +94,7 @@ def sync_detailed(
 ) -> Response[Any | ErrorResponse]:
     """Attach managed-process standard I/O
 
-     Upgrades to the OSEP-0015 WebSocket protocol. Client binary frames are
+     Upgrades to the OSEP-0023 WebSocket protocol. Client binary frames are
     `[0x00][uint64 sequence, big-endian][stdin bytes]`; server binary frames are
     `[0x01|0x02][uint64 offset, big-endian][stdout|stderr bytes]`. Text control
     frames publish connected positions, stdin acknowledgements and EOF, output
@@ -139,7 +139,7 @@ def sync(
 ) -> Any | ErrorResponse | None:
     """Attach managed-process standard I/O
 
-     Upgrades to the OSEP-0015 WebSocket protocol. Client binary frames are
+     Upgrades to the OSEP-0023 WebSocket protocol. Client binary frames are
     `[0x00][uint64 sequence, big-endian][stdin bytes]`; server binary frames are
     `[0x01|0x02][uint64 offset, big-endian][stdout|stderr bytes]`. Text control
     frames publish connected positions, stdin acknowledgements and EOF, output
@@ -179,7 +179,7 @@ async def asyncio_detailed(
 ) -> Response[Any | ErrorResponse]:
     """Attach managed-process standard I/O
 
-     Upgrades to the OSEP-0015 WebSocket protocol. Client binary frames are
+     Upgrades to the OSEP-0023 WebSocket protocol. Client binary frames are
     `[0x00][uint64 sequence, big-endian][stdin bytes]`; server binary frames are
     `[0x01|0x02][uint64 offset, big-endian][stdout|stderr bytes]`. Text control
     frames publish connected positions, stdin acknowledgements and EOF, output
@@ -222,7 +222,7 @@ async def asyncio(
 ) -> Any | ErrorResponse | None:
     """Attach managed-process standard I/O
 
-     Upgrades to the OSEP-0015 WebSocket protocol. Client binary frames are
+     Upgrades to the OSEP-0023 WebSocket protocol. Client binary frames are
     `[0x00][uint64 sequence, big-endian][stdin bytes]`; server binary frames are
     `[0x01|0x02][uint64 offset, big-endian][stdout|stderr bytes]`. Text control
     frames publish connected positions, stdin acknowledgements and EOF, output

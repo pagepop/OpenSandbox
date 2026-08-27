@@ -28,6 +28,7 @@ import type {
 } from "../services/managedTerminals.js";
 import type { ExecdClient } from "../openapi/execdClient.js";
 import { waitForPublication } from "./abortablePublication.js";
+import { recoverManagedCreatePublication } from "./managedCreatePublication.js";
 import { openManagedTerminalAttachment } from "./managedTerminalAttachment.js";
 import { throwOnOpenApiFetchError } from "./openapiError.js";
 
@@ -85,8 +86,8 @@ class ManagedTerminalHandleImpl implements ManagedTerminalHandle {
   async signalForeground(
     request: SignalManagedTerminalForegroundRequest,
     signal?: AbortSignal,
-  ): Promise<void> {
-    await this.terminals.signalForeground(
+  ): Promise<number> {
+    return this.terminals.signalForeground(
       await this.requireTerminalId(signal),
       request,
       signal,
@@ -165,12 +166,13 @@ export class ManagedTerminalsAdapter implements ManagedTerminals {
     terminalId: string,
     request: SignalManagedTerminalForegroundRequest,
     signal?: AbortSignal,
-  ): Promise<void> {
-    const { error, response } = await this.client.POST(
+  ): Promise<number> {
+    const { data, error, response } = await this.client.POST(
       "/v1/terminals/{terminalId}/foreground/signal",
       { params: { path: { terminalId } }, body: request, signal },
     );
     throwOnOpenApiFetchError({ error, response }, "Signal managed terminal foreground failed");
+    return requireData(data, "Signal managed terminal foreground failed").processGroup;
   }
 
   async terminate(
@@ -212,11 +214,14 @@ export class ManagedTerminalsAdapter implements ManagedTerminals {
     request: CreateManagedTerminalRequest,
     signal?: AbortSignal,
   ): Promise<ManagedTerminalStatus> {
-    const { data, error, response } = await this.client.POST(
-      "/v1/terminals",
-      { body: request, signal },
+    const body = JSON.stringify(request);
+    return recoverManagedCreatePublication<ManagedTerminalStatus>(
+      () => this.client.POST(
+        "/v1/terminals",
+        { body: request, bodySerializer: () => body, signal, parseAs: "stream" },
+      ),
+      signal,
+      "Create managed terminal failed",
     );
-    throwOnOpenApiFetchError({ error, response }, "Create managed terminal failed");
-    return requireData(data, "Create managed terminal failed");
   }
 }

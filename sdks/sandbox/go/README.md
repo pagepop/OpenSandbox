@@ -223,10 +223,12 @@ Created with `NewExecdClient(baseURL, accessToken string, opts ...Option)`.
 | `CreateManagedTerminal(ctx, req)` | Allocate a PTY and start or replay an exact-argv create |
 | `AttachManagedTerminal(ctx, terminalID, opts)` | Attach raw terminal input and retained merged output over WebSocket |
 | `GetManagedTerminalForeground(ctx, terminalID)` | Inspect the current foreground process group |
-| `SignalManagedTerminalForeground(ctx, terminalID, signal)` | Signal the current foreground process group |
+| `SignalManagedTerminalForeground(ctx, terminalID, signal)` | Signal and return the current foreground process group |
 | `TerminateManagedTerminal(ctx, terminalID, opts)` | Terminate the complete terminal session |
 
 `Sandbox.StartManagedProcess` and `Sandbox.StartManagedTerminal` return deferred handles. Wait for `WaitReady` before relying on their opaque ID or diagnostic PID. Attachment reads preserve wire bytes and offsets; callers retain the latest offsets for reconnects and handle reported gaps.
+
+If a managed create transport fails before its success response is completely read, the SDK resends the same serialized request with the same operation ID once. HTTP errors, caller cancellation, and JSON decoding errors are not retried.
 
 **File Operations:**
 | Method | Description |

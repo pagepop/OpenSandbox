@@ -66,7 +66,7 @@ func TestManagedTerminalControlAndDeferredPublication(t *testing.T) {
 			var request signalManagedTerminalForegroundWireRequest
 			require.NoError(t, json.NewDecoder(r.Body).Decode(&request))
 			require.Equal(t, ManagedTerminalSignalInterrupt, request.Signal)
-			w.WriteHeader(http.StatusNoContent)
+			jsonResponse(w, http.StatusOK, signalManagedTerminalForegroundWireResponse{ProcessGroup: 5432})
 		case r.Method == http.MethodPost && r.URL.EscapedPath() == "/v1/terminals/term%2F1/terminate":
 			var request terminateBody
 			if r.ContentLength != 0 {
@@ -133,7 +133,9 @@ func TestManagedTerminalControlAndDeferredPublication(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 5432, foreground.ProcessGroup)
 	require.True(t, foreground.InputWaiting)
-	require.NoError(t, handle.SignalForeground(context.Background(), ManagedTerminalSignalInterrupt))
+	signaledGroup, err := handle.SignalForeground(context.Background(), ManagedTerminalSignalInterrupt)
+	require.NoError(t, err)
+	require.Equal(t, 5432, signaledGroup)
 
 	zero := time.Duration(0)
 	status, err = handle.Terminate(context.Background(), &TerminateManagedTerminalOptions{Grace: &zero})

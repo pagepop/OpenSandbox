@@ -17,13 +17,13 @@
  * Do not make direct changes to the file.
  */
 
-
 /**
  * NOTE: The session-related path types and operations in this file (e.g. /session, runInSession)
  * are generated from the execd OpenAPI spec. They are not the recommended runtime entry point.
  * Use `sandbox.commands.createSession()`, `sandbox.commands.runInSession()`, and
  * `sandbox.commands.deleteSession()` instead.
  */
+
 export interface paths {
     "/ping": {
         parameters: {
@@ -677,7 +677,7 @@ export interface paths {
         };
         /**
          * Attach managed-process standard I/O
-         * @description Upgrades to the OSEP-0015 WebSocket protocol. Client binary frames are
+         * @description Upgrades to the OSEP-0023 WebSocket protocol. Client binary frames are
          *     `[0x00][uint64 sequence, big-endian][stdin bytes]`; server binary frames are
          *     `[0x01|0x02][uint64 offset, big-endian][stdout|stderr bytes]`. Text control
          *     frames publish connected positions, stdin acknowledgements and EOF, output
@@ -766,7 +766,7 @@ export interface paths {
         };
         /**
          * Attach managed-terminal input and output
-         * @description Upgrades to the OSEP-0015 terminal WebSocket protocol. Client binary input is
+         * @description Upgrades to the OSEP-0023 terminal WebSocket protocol. Client binary input is
          *     `[0x00][terminal bytes]`; server binary output is
          *     `[0x01][uint64 offset, big-endian][terminal bytes]`. A client text resize frame
          *     contains `type`, `rows`, and `cols`. Server text frames publish connection,
@@ -1293,6 +1293,10 @@ export interface components {
         SignalManagedTerminalRequest: {
             /** @enum {string} */
             signal: "SIGINT" | "SIGTERM" | "SIGKILL" | "SIGTSTP" | "SIGHUP";
+        };
+        SignalManagedTerminalResponse: {
+            /** Format: int32 */
+            processGroup: number;
         };
         /** @description Request to create a bash session (optional body; empty treated as defaults) */
         CreateSessionRequest: {
@@ -3243,12 +3247,14 @@ export interface operations {
             };
         };
         responses: {
-            /** @description Signal delivered */
-            204: {
+            /** @description Signal delivered to the reported process group */
+            200: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["SignalManagedTerminalResponse"];
+                };
             };
             400: components["responses"]["BadRequest"];
             404: components["responses"]["NotFound"];

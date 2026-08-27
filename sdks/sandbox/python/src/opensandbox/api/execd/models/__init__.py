@@ -87,6 +87,7 @@ from .session_state_status import SessionStateStatus
 from .session_state_uid_mode import SessionStateUidMode
 from .signal_managed_terminal_request import SignalManagedTerminalRequest
 from .signal_managed_terminal_request_signal import SignalManagedTerminalRequestSignal
+from .signal_managed_terminal_response import SignalManagedTerminalResponse
 from .terminate_managed_request import TerminateManagedRequest
 from .upload_file_body import UploadFileBody
 
@@ -162,6 +163,7 @@ __all__ = (
     "SessionStateUidMode",
     "SignalManagedTerminalRequest",
     "SignalManagedTerminalRequestSignal",
+    "SignalManagedTerminalResponse",
     "TerminateManagedRequest",
     "UploadFileBody",
 )

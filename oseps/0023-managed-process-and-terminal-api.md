@@ -170,7 +170,7 @@ The OpenAPI specification defines these additive routes:
 | `GET` | `/v1/terminals/{terminalId}` | Read terminal publication and direct outcome |
 | `GET` | `/v1/terminals/{terminalId}/io` | Attach terminal input/output WebSocket transport |
 | `GET` | `/v1/terminals/{terminalId}/foreground` | Inspect the current foreground process group |
-| `POST` | `/v1/terminals/{terminalId}/foreground/signal` | Signal the current foreground process group |
+| `POST` | `/v1/terminals/{terminalId}/foreground/signal` | Signal and return the current foreground process group |
 | `POST` | `/v1/terminals/{terminalId}/terminate` | Terminate and await the complete terminal session |
 | `DELETE` | `/v1/terminals/{terminalId}` | Remove a terminated terminal record and retained output |
 
@@ -265,7 +265,7 @@ The managed terminal implementation extends the existing PTY runtime rather than
 - The child owns a controlling terminal and a new session.
 - Input and output are raw terminal bytes; stdout and stderr have normal PTY merged-stream semantics.
 - Foreground inspection uses `tcgetpgrp`. `inputWaiting` is true only when `execd` can prove the foreground group is blocked on terminal input; inability to prove it returns false.
-- Supported foreground signals are SIGINT, SIGTERM, SIGKILL, SIGTSTP, and SIGHUP.
+- Supported foreground signals are SIGINT, SIGTERM, SIGKILL, SIGTSTP, and SIGHUP. The signal operation returns the process-group ID used for that delivery so callers do not race a separate foreground inspection.
 - Terminal termination rejects new operations, joins in-flight writes/inspection/signals, terminates all observable session groups, drains queued output, and returns only after quiescence.
 
 ### execd shutdown
@@ -277,6 +277,8 @@ Normal `execd` shutdown rejects new allocations, starts force-bounded cleanup fo
 ### Client integration
 
 The JavaScript and Go sandbox SDKs receive handwritten managed-process facades over the generated API and WebSocket transport. Other generated SDKs remain schema-aligned; ergonomic streaming facades may follow without blocking the PagePop integration.
+
+The JavaScript and Go facades retry a managed create once when the transport rejects or a successful response body is interrupted. The retry uses the same client, serialized request, and `operationId`; HTTP responses, caller aborts, and JSON decoding errors are not retried.
 
 Remote synchronous callers use a deferred handle:
 
