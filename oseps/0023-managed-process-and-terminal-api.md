@@ -280,6 +280,8 @@ The JavaScript and Go sandbox SDKs receive handwritten managed-process facades o
 
 The JavaScript and Go facades retry a managed create once when the transport rejects or a successful response body is interrupted. The retry uses the same client, serialized request, and `operationId`; HTTP responses, caller aborts, and JSON decoding errors are not retried.
 
+A caller abort stops the local SDK wait but does not cancel an allocation already accepted by `execd`. A lifecycle owner that cannot prove the create outcome replays the exact request with the same `operationId` under a fresh cancellation scope, recovers the published ID, and then either adopts or terminates and deletes that resource. The SDK primitive does not perform this owner recovery because it cannot infer whether cancellation abandons the requested resource.
+
 Remote synchronous callers use a deferred handle:
 
 ```ts
@@ -316,7 +318,7 @@ Unit and component tests cover:
 7. A TERM-trapping process escalates to SIGKILL after the requested grace period.
 8. A direct child exit with a surviving group member leaves `treeEmpty=false` until the survivor exits or is terminated.
 9. Repeated and late terminate calls do not signal a reused PID or process group.
-10. Allocation cancellation before and after process publication leaves no unmanaged process.
+10. Caller cancellation is not retried by the SDK; same-`operationId` owner recovery finds any accepted allocation so it can be adopted or cleaned up, and no process escapes the `execd` registry.
 11. `execd` shutdown joins every managed process and terminal or causes the sandbox container to exit.
 12. PTY tests cover initial dimensions, raw input/output, foreground-group inspection, supported signals, queued-output drain, and awaited cleanup.
 13. A TKE smoke test runs Bash and a raw-pipe language server in a real sandbox without privileged or writable-cgroup configuration.

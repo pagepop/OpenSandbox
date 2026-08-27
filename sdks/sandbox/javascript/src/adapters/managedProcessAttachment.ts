@@ -28,6 +28,8 @@ import {
   deferred,
   rawDataBytes,
   type Deferred,
+  WEB_SOCKET_OUTPUT_HIGH_WATER_BYTES,
+  WEB_SOCKET_OUTPUT_LOW_WATER_BYTES,
 } from "./webSocketQueue.js";
 
 const STDIN_FRAME = 0x00;
@@ -70,8 +72,8 @@ function frameString(value: unknown, field: string): string {
 }
 
 class ManagedProcessAttachmentImpl implements ManagedProcessAttachment {
-  readonly stdout = new AsyncQueue<Uint8Array>();
-  readonly stderr = new AsyncQueue<Uint8Array>();
+  readonly stdout: AsyncQueue<Uint8Array>;
+  readonly stderr: AsyncQueue<Uint8Array>;
   readonly gaps = new AsyncQueue<ManagedProcessOutputGap>();
 
   private readonly connectedResult = deferred<ManagedProcessConnected>();
@@ -81,6 +83,7 @@ class ManagedProcessAttachmentImpl implements ManagedProcessAttachment {
   private readonly pendingWrites = new Map<number, Deferred<void>>();
   private stdinEOF: { sequence: number; result: Deferred<void> } | undefined;
   private failed = false;
+  private receivePaused = false;
   private abortListener: (() => void) | undefined;
   private currentStdinSequence: number;
   private currentStdoutOffset: number;
@@ -96,6 +99,9 @@ class ManagedProcessAttachmentImpl implements ManagedProcessAttachment {
     request: ManagedProcessAttachRequest,
     private readonly signal?: AbortSignal,
   ) {
+    const outputQueueChanged = () => this.updateReceiveFlow();
+    this.stdout = new AsyncQueue((data) => data.byteLength, outputQueueChanged);
+    this.stderr = new AsyncQueue((data) => data.byteLength, outputQueueChanged);
     this.currentStdinSequence = request.stdinSequence;
     this.currentStdoutOffset = request.stdoutOffset;
     this.currentStderrOffset = request.stderrOffset;
@@ -269,9 +275,12 @@ class ManagedProcessAttachmentImpl implements ManagedProcessAttachment {
       }
       case "stdin_ack": {
         const sequence = frameNumber(frame.sequence, "sequence");
-        this.currentStdinSequence = sequence;
-        this.pendingWrites.get(sequence)?.resolve();
-        this.pendingWrites.delete(sequence);
+        this.currentStdinSequence = Math.max(this.currentStdinSequence, sequence);
+        for (const [pendingSequence, result] of this.pendingWrites) {
+          if (pendingSequence > sequence) continue;
+          result.resolve();
+          this.pendingWrites.delete(pendingSequence);
+        }
         return;
       }
       case "stdin_eof": {
@@ -347,6 +356,17 @@ class ManagedProcessAttachmentImpl implements ManagedProcessAttachment {
   private protocolFailure(reason: unknown): void {
     this.fail(reason);
     this.socket.close(POLICY_VIOLATION_CLOSE, "invalid managed process frame");
+  }
+
+  private updateReceiveFlow(): void {
+    const bufferedBytes = this.stdout.bufferedWeight + this.stderr.bufferedWeight;
+    if (!this.receivePaused && bufferedBytes >= WEB_SOCKET_OUTPUT_HIGH_WATER_BYTES) {
+      this.receivePaused = true;
+      this.socket.pause();
+    } else if (this.receivePaused && bufferedBytes <= WEB_SOCKET_OUTPUT_LOW_WATER_BYTES) {
+      this.receivePaused = false;
+      this.socket.resume();
+    }
   }
 
   private fail(reason: unknown, normal = false): void {

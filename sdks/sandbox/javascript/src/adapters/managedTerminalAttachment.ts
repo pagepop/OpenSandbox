@@ -23,7 +23,13 @@ import type {
   ManagedTerminalOutputGap,
 } from "../models/managedTerminal.js";
 import type { ManagedTerminalAttachment } from "../services/managedTerminals.js";
-import { AsyncQueue, deferred, rawDataBytes } from "./webSocketQueue.js";
+import {
+  AsyncQueue,
+  deferred,
+  rawDataBytes,
+  WEB_SOCKET_OUTPUT_HIGH_WATER_BYTES,
+  WEB_SOCKET_OUTPUT_LOW_WATER_BYTES,
+} from "./webSocketQueue.js";
 
 const INPUT_FRAME = 0x00;
 const OUTPUT_FRAME = 0x01;
@@ -62,13 +68,14 @@ function frameString(value: unknown, field: string): string {
 }
 
 class ManagedTerminalAttachmentImpl implements ManagedTerminalAttachment {
-  readonly output = new AsyncQueue<Uint8Array>();
+  readonly output: AsyncQueue<Uint8Array>;
   readonly gaps = new AsyncQueue<ManagedTerminalOutputGap>();
 
   private readonly connectedResult = deferred<ManagedTerminalConnected>();
   private readonly outputEOFResult = deferred<ManagedTerminalOutputEOF>();
   private readonly exitResult = deferred<ManagedTerminalExit>();
   private failed = false;
+  private receivePaused = false;
   private abortListener: (() => void) | undefined;
   private currentOutputOffset: number;
 
@@ -81,6 +88,10 @@ class ManagedTerminalAttachmentImpl implements ManagedTerminalAttachment {
     request: ManagedTerminalAttachRequest,
     private readonly signal?: AbortSignal,
   ) {
+    this.output = new AsyncQueue(
+      (data) => data.byteLength,
+      () => this.updateReceiveFlow(),
+    );
     this.currentOutputOffset = request.outputOffset;
     for (const promise of [this.connected, this.outputEOF, this.exit]) {
       void promise.catch(() => undefined);
@@ -245,6 +256,17 @@ class ManagedTerminalAttachmentImpl implements ManagedTerminalAttachment {
   private protocolFailure(reason: unknown): void {
     this.fail(reason);
     this.socket.close(POLICY_VIOLATION_CLOSE, "invalid managed terminal frame");
+  }
+
+  private updateReceiveFlow(): void {
+    const bufferedBytes = this.output.bufferedWeight;
+    if (!this.receivePaused && bufferedBytes >= WEB_SOCKET_OUTPUT_HIGH_WATER_BYTES) {
+      this.receivePaused = true;
+      this.socket.pause();
+    } else if (this.receivePaused && bufferedBytes <= WEB_SOCKET_OUTPUT_LOW_WATER_BYTES) {
+      this.receivePaused = false;
+      this.socket.resume();
+    }
   }
 
   private fail(reason: unknown, normal = false): void {

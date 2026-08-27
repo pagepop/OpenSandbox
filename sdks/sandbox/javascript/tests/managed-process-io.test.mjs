@@ -5,6 +5,7 @@ import test from "node:test";
 import { WebSocketServer } from "ws";
 
 import { createExecdClient, ManagedProcessesAdapter } from "../dist/internal.js";
+import { deferred, trackWebSocketReceiveFlow } from "./helpers.mjs";
 
 function managedProcesses(options) {
   const client = createExecdClient(options);
@@ -163,6 +164,117 @@ test("managed process attachment preserves frames, offsets, gaps, and acknowledg
   assert.deepEqual(await attachment.stderrEOF, { offset: 5, clean: false });
   assert.deepEqual(await attachment.exit, { exitCode: null, signal: "SIGKILL" });
   await serverDone;
+});
+
+test("managed process attachment applies aggregate output backpressure", { timeout: 5_000 }, async (t) => {
+  const server = createServer();
+  const webSockets = new WebSocketServer({ server });
+  t.after(() => {
+    webSockets.close();
+    server.close();
+  });
+  await new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolve);
+  });
+  const address = server.address();
+  assert.equal(typeof address, "object");
+
+  const pathname = "/v1/processes/flow/io";
+  const flow = trackWebSocketReceiveFlow(t, pathname);
+  const chunkSize = 600 * 1024;
+  const chunk = "x".repeat(chunkSize);
+  webSockets.once("connection", (socket) => {
+    socket.send(JSON.stringify({
+      type: "connected",
+      processId: "flow",
+      stdinSequence: 0,
+      stdoutOffset: chunkSize,
+      stderrOffset: chunkSize,
+    }));
+    socket.send(outputFrame(0x01, 0, chunk));
+    socket.send(outputFrame(0x02, 0, chunk));
+  });
+
+  const attachment = await managedProcesses({
+    baseUrl: `http://127.0.0.1:${address.port}`,
+  }).attach("flow", {
+    stdinSequence: 0,
+    stdoutOffset: 0,
+    stderrOffset: 0,
+  });
+  await attachment.connected;
+  await flow.paused;
+  assert.equal(flow.pauseCount, 1);
+
+  const stdout = await attachment.stdout[Symbol.asyncIterator]().next();
+  assert.equal(stdout.value.byteLength, chunkSize);
+  assert.equal(flow.resumeCount, 0);
+  const stderr = await attachment.stderr[Symbol.asyncIterator]().next();
+  assert.equal(stderr.value.byteLength, chunkSize);
+  await flow.resumed;
+  assert.equal(flow.resumeCount, 1);
+  attachment.close();
+});
+
+test("managed process attachment treats stdin acknowledgements as cumulative", { timeout: 5_000 }, async (t) => {
+  const server = createServer();
+  const webSockets = new WebSocketServer({ server });
+  const serverDone = deferred();
+  t.after(() => {
+    webSockets.close();
+    server.close();
+  });
+  await new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolve);
+  });
+  const address = server.address();
+  assert.equal(typeof address, "object");
+
+  const receivedSequences = [];
+  webSockets.once("connection", (socket) => {
+    socket.send(JSON.stringify({
+      type: "connected",
+      processId: "stdin-ack",
+      stdinSequence: 4,
+      stdoutOffset: 0,
+      stderrOffset: 0,
+    }));
+    socket.on("message", (raw) => {
+      const frame = new Uint8Array(raw.buffer, raw.byteOffset, raw.byteLength);
+      receivedSequences.push(Number(new DataView(
+        frame.buffer,
+        frame.byteOffset + 1,
+        8,
+      ).getBigUint64(0, false)));
+      if (receivedSequences.length === 2) {
+        socket.send(JSON.stringify({ type: "stdin_ack", sequence: 6 }));
+      } else if (receivedSequences.length === 3) {
+        socket.send(JSON.stringify({ type: "stdin_ack", sequence: 5 }));
+        serverDone.resolve();
+      }
+    });
+  });
+
+  const attachment = await managedProcesses({
+    baseUrl: `http://127.0.0.1:${address.port}`,
+  }).attach("stdin-ack", {
+    stdinSequence: 4,
+    stdoutOffset: 0,
+    stderrOffset: 0,
+  });
+  await attachment.connected;
+  await Promise.all([
+    attachment.write(5, new Uint8Array([5])),
+    attachment.write(6, new Uint8Array([6])),
+  ]);
+  assert.equal(attachment.stdinSequence, 6);
+  await attachment.write(5, new Uint8Array([5]));
+  assert.equal(attachment.stdinSequence, 6);
+  assert.deepEqual(receivedSequences, [5, 6, 5]);
+  await serverDone.promise;
+  attachment.close();
 });
 
 test("managed process attachment rejects binary data before connected", async (t) => {

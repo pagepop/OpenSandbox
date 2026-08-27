@@ -14,6 +14,9 @@
 
 import type { RawData } from "ws";
 
+export const WEB_SOCKET_OUTPUT_HIGH_WATER_BYTES = 1024 * 1024;
+export const WEB_SOCKET_OUTPUT_LOW_WATER_BYTES = 512 * 1024;
+
 export interface Deferred<T> {
   readonly promise: Promise<T>;
   readonly settled: () => boolean;
@@ -49,14 +52,28 @@ export class AsyncQueue<T> implements AsyncIterable<T> {
   private readonly values: T[] = [];
   private valueHead = 0;
   private readonly waiters: Deferred<IteratorResult<T>>[] = [];
+  private currentBufferedWeight = 0;
   private ended = false;
   private failure: unknown;
+
+  constructor(
+    private readonly valueWeight: (value: T) => number = () => 1,
+    private readonly onBufferedWeightChange?: (weight: number) => void,
+  ) {}
+
+  get bufferedWeight(): number {
+    return this.currentBufferedWeight;
+  }
 
   push(value: T): void {
     if (this.ended || this.failure !== undefined) return;
     const waiter = this.waiters.shift();
     if (waiter) waiter.resolve({ value, done: false });
-    else this.values.push(value);
+    else {
+      this.values.push(value);
+      this.currentBufferedWeight += this.valueWeight(value);
+      this.onBufferedWeightChange?.(this.currentBufferedWeight);
+    }
   }
 
   end(): void {
@@ -78,10 +95,12 @@ export class AsyncQueue<T> implements AsyncIterable<T> {
       next: () => {
         if (this.valueHead < this.values.length) {
           const value = this.values[this.valueHead++]!;
+          this.currentBufferedWeight -= this.valueWeight(value);
           if (this.valueHead === this.values.length) {
             this.values.length = 0;
             this.valueHead = 0;
           }
+          this.onBufferedWeightChange?.(this.currentBufferedWeight);
           return Promise.resolve({ value, done: false });
         }
         if (this.failure !== undefined) return Promise.reject(this.failure);

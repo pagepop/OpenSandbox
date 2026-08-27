@@ -5,7 +5,7 @@ import test from "node:test";
 import { WebSocketServer } from "ws";
 
 import { createExecdClient, ManagedTerminalsAdapter } from "../dist/internal.js";
-import { deferred } from "./helpers.mjs";
+import { deferred, trackWebSocketReceiveFlow } from "./helpers.mjs";
 
 function managedTerminals(options) {
   const client = createExecdClient(options);
@@ -129,6 +129,31 @@ test("managed terminal attachment preserves input, output, gaps, and resize", as
   assert.deepEqual(await attachment.outputEOF, { offset: 10 });
   assert.deepEqual(await attachment.exit, { exitCode: null, signal: "SIGKILL" });
   await serverDone.promise;
+});
+
+test("managed terminal attachment applies output backpressure", { timeout: 5_000 }, async (t) => {
+  const { webSockets, baseUrl } = await listeningServer(t);
+  const flow = trackWebSocketReceiveFlow(t, "/v1/terminals/flow/io");
+  const outputSize = 1024 * 1024;
+  webSockets.once("connection", (socket) => {
+    socket.send(JSON.stringify({
+      type: "connected",
+      terminalId: "flow",
+      outputOffset: outputSize,
+    }));
+    socket.send(outputFrame(0, "x".repeat(outputSize)));
+  });
+
+  const attachment = await managedTerminals({ baseUrl })
+    .attach("flow", { outputOffset: 0 });
+  await attachment.connected;
+  await flow.paused;
+  assert.equal(flow.pauseCount, 1);
+  const output = await attachment.output[Symbol.asyncIterator]().next();
+  assert.equal(output.value.byteLength, outputSize);
+  await flow.resumed;
+  assert.equal(flow.resumeCount, 1);
+  attachment.close();
 });
 
 test("managed terminal attachment rejects binary data before connected", async (t) => {
