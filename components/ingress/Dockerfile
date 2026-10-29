@@ -12,7 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-FROM golang:1.25.9 AS builder
+FROM golang:1.26.10-bookworm@sha256:23ce71337b726608afb1bc00986e630a05034a87a87ea1fc2cd1ae5cf33387eb AS builder
+ENV GOTOOLCHAIN=local
 
 WORKDIR /build
 
@@ -59,7 +60,10 @@ RUN if [ -n "${CC}" ]; then export CC; fi; \
               -X 'github.com/alibaba/opensandbox/internal/version.GitCommit=${GIT_COMMIT}'" \
     -o /build/ingress ./main.go
 
-FROM alpine:latest
+FROM alpine:3.24@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a
+
+RUN apk add --no-cache 'ca-certificates>=20261020-r0' \
+    && update-ca-certificates
 
 COPY --from=builder /build/ingress .
 

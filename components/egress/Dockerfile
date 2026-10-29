@@ -12,7 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-FROM golang:1.25.9-bookworm AS builder
+FROM golang:1.26.10-bookworm@sha256:23ce71337b726608afb1bc00986e630a05034a87a87ea1fc2cd1ae5cf33387eb AS builder
+ENV GOTOOLCHAIN=local
 
 WORKDIR /workspace
 
@@ -85,7 +86,7 @@ RUN go build ${GOFLAGS} -trimpath -buildvcs=false \
     -ldflags "-s -w -buildid= -B none" \
     -o /out/egress-trace ./tools/egress-trace
 
-FROM debian:bookworm-slim
+FROM debian:bookworm-slim@sha256:99c0b25c46d0214d5a2091092e7908907dcaecd6a962cde0ac700acee222b6f3
 
 # Optional Debian mirror host for restricted build networks (e.g.
 # mirrors.aliyun.com); empty keeps the default deb.debian.org sources.
@@ -126,6 +127,8 @@ RUN if [ -n "${APT_MIRROR}" ]; then \
         lsof \
         python3 \
         python3-pip \
+    && dpkg --compare-versions "$(dpkg-query -W -f='${Version}' ca-certificates)" ge 20250419~deb12u2 \
+    && update-ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 # Python mitmproxy (transparent mode): mitmdump runs as user mitmproxy; iptables skips this uid.

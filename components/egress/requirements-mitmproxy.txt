@@ -2,3 +2,4 @@
 mitmproxy==11.0.2
 h2==4.1.0
 hyperframe==6.0.1
+certifi==2026.10.23
