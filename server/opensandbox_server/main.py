@@ -1,4 +1,4 @@
-# Copyright 2025 Alibaba Group Holding Ltd.
+# Copyright 2025 The OpenSandbox Authors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -26,12 +26,13 @@ from typing import Any
 
 import httpx
 from fastapi import FastAPI, Request
-from fastapi.exceptions import HTTPException
+from fastapi.exceptions import HTTPException, RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from starlette.types import ASGIApp
 
 from opensandbox_server.config import load_config
+from opensandbox_server.integrations.idle_pause import start_idle_pause_sweeper
 from opensandbox_server.integrations.renew_intent import start_renew_intent_consumer
 from opensandbox_server.logging_config import configure_logging
 from opensandbox_server.startup_guard import api_key_confirm
@@ -87,12 +88,26 @@ def _build_tenant_provider(config) -> TenantProvider | None:
 
 tenant_provider: TenantProvider | None = _build_tenant_provider(app_config)
 
+
+def _idle_pause_namespaces() -> list[str]:
+    """Default fast-sandbox namespace plus every configured tenant namespace."""
+    default_namespace = (app_config.kubernetes.namespace if app_config.kubernetes else None) or "default"
+    namespaces = [default_namespace]
+    if tenant_provider is not None:
+        namespaces.extend(
+            entry.namespace
+            for entry in tenant_provider.list_tenants()
+            if entry.namespace != default_namespace
+        )
+    return namespaces
+
 from opensandbox_server.api.devops import router as devops_router  # noqa: E402
 from opensandbox_server.api.metrics import router as metrics_router  # noqa: E402
 from opensandbox_server.api.pool import router as pool_router  # noqa: E402
 from opensandbox_server.api.lifecycle import router, sandbox_service, snapshot_service  # noqa: E402
 from opensandbox_server.api.proxy import router as proxy_router  # noqa: E402
 from opensandbox_server.api.network_policy import router as policy_router  # noqa: E402
+from opensandbox_server.api.credential_vault import router as credential_vault_router  # noqa: E402
 from opensandbox_server.api.templates import router as templates_router  # noqa: E402
 from opensandbox_server.integrations.otel import setup_otel_metrics, shutdown_otel_metrics  # noqa: E402
 from opensandbox_server.integrations.renew_intent.proxy_renew import ProxyRenewCoordinator  # noqa: E402
@@ -101,6 +116,7 @@ from opensandbox_server.middleware.date_header import DateHeaderMiddleware  # no
 from opensandbox_server.middleware.http_metrics import HttpMetricsMiddleware  # noqa: E402
 from opensandbox_server.middleware.request_id import RequestIdMiddleware  # noqa: E402
 from opensandbox_server.repositories.snapshots.factory import close_snapshot_repository  # noqa: E402
+from opensandbox_server.services.constants import OPEN_SANDBOX_ORIGIN_HEADER  # noqa: E402
 from opensandbox_server.services.extension_service import require_extension_service  # noqa: E402
 from opensandbox_server.services.runtime_resolver import (  # noqa: E402
     validate_secure_runtime_on_startup,
@@ -122,7 +138,7 @@ async def lifespan(app: FastAPI):
         try:
             api_key_confirm(configured_api_key=app_config.server.api_key)
         except Exception as exc:
-            logger.error("API key startup confirmation failed: %s", exc)
+            logger.error(f"API key startup confirmation failed: {exc}")
             os._exit(1)
 
     if tenant_provider is not None:
@@ -139,7 +155,7 @@ async def lifespan(app: FastAPI):
                 core_v1_api = K8sClient(app_config.kubernetes).get_core_v1_api()
                 validate_tenant_namespaces_on_startup(tenant_provider, core_v1_api)
             except Exception as exc:
-                logger.error("Tenant namespace validation failed: %s", exc)
+                logger.error(f"Tenant namespace validation failed: {exc}")
                 os._exit(1)
         else:
             logger.warning(
@@ -153,9 +169,7 @@ async def lifespan(app: FastAPI):
 
     app.state.http_client = httpx.AsyncClient(timeout=180.0)
 
-    # Validate secure runtime configuration at startup
     try:
-        # Determine which runtime client to create based on config
         docker_client = None
         k8s_client = None
         runtime_type = app_config.runtime.type
@@ -178,7 +192,7 @@ async def lifespan(app: FastAPI):
         )
 
     except Exception as exc:
-        logger.error("Secure runtime validation failed: %s", exc)
+        logger.error(f"Secure runtime validation failed: {exc}")
         raise
 
     ext = require_extension_service(sandbox_service)
@@ -194,10 +208,23 @@ async def lifespan(app: FastAPI):
         app.state.renew_intent_consumer,
     )
 
+    if app_config.automation.idle_pause.enabled:
+        # Namespace list is re-resolved by the sweeper every sweep.
+        app.state.idle_pause_sweeper = await start_idle_pause_sweeper(
+            app_config,
+            sandbox_service,
+            namespace_resolver=_idle_pause_namespaces,
+        )
+    else:
+        app.state.idle_pause_sweeper = None
+
     setup_otel_metrics(app_config.otel)
 
     yield
 
+    idle_sweeper = getattr(app.state, "idle_pause_sweeper", None)
+    if idle_sweeper is not None:
+        await idle_sweeper.stop()
     consumer = getattr(app.state, "renew_intent_consumer", None)
     if consumer is not None:
         await consumer.stop()
@@ -213,7 +240,6 @@ async def lifespan(app: FastAPI):
     await app.state.http_client.aclose()
 
 
-# Initialize FastAPI application
 app = _DateHeaderFastAPI(
     title="OpenSandbox Lifecycle API",
     version=API_CONTRACT_VERSION,
@@ -224,7 +250,6 @@ app = _DateHeaderFastAPI(
     lifespan=lifespan,
 )
 
-# Attach global config for runtime access
 app.state.config = app_config
 app.state.tenant_provider = tenant_provider
 
@@ -238,6 +263,7 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=[OPEN_SANDBOX_ORIGIN_HEADER],
 )
 # RequestIdMiddleware wraps auth and CORS so every response (including 401 from
 # AuthMiddleware) gets X-Request-ID and logs have request_id in context.
@@ -255,6 +281,7 @@ app.include_router(pool_router)
 app.include_router(templates_router)
 app.include_router(proxy_router)
 app.include_router(policy_router)
+app.include_router(credential_vault_router)
 app.include_router(router, prefix="/v1")
 app.include_router(devops_router, prefix="/v1")
 app.include_router(pool_router, prefix="/v1")
@@ -262,6 +289,7 @@ app.include_router(templates_router, prefix="/v1")
 app.include_router(metrics_router, prefix="/v1")
 app.include_router(proxy_router, prefix="/v1")
 app.include_router(policy_router, prefix="/v1")
+app.include_router(credential_vault_router, prefix="/v1")
 
 DEFAULT_ERROR_CODE = "GENERAL::UNKNOWN_ERROR"
 DEFAULT_ERROR_MESSAGE = "An unexpected error occurred."
@@ -292,6 +320,25 @@ async def sandbox_http_exception_handler(request: Request, exc: HTTPException):
     )
 
 
+@app.exception_handler(RequestValidationError)
+async def request_validation_exception_handler(
+    request: Request, exc: RequestValidationError
+):
+    """
+    Return validation errors without echoing the submitted input.
+
+    pydantic v2 error entries carry ``input`` (the whole submitted object) and
+    ``ctx``; on Credential Vault bodies they would echo write-only credential
+    values back to the caller (and any intermediate logging) on a plain 422.
+    Only the location/type/message fields are returned.
+    """
+    sanitized = [
+        {key: value for key, value in error.items() if key not in ("input", "ctx")}
+        for error in exc.errors()
+    ]
+    return JSONResponse(status_code=422, content={"detail": sanitized})
+
+
 @app.get("/health")
 async def health_check():
     """
@@ -317,7 +364,6 @@ async def version_info():
 if __name__ == "__main__":
     import uvicorn
 
-    # Run the application
     uvicorn.run(
         "opensandbox_server.main:app",
         host=app_config.server.host,

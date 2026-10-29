@@ -1,4 +1,4 @@
-# Copyright 2025 Alibaba Group Holding Ltd.
+# Copyright 2025 The OpenSandbox Authors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -34,6 +34,15 @@ class SnapshotRuntimeStatus:
     image: Optional[str] = None
     reason: Optional[str] = None
     message: Optional[str] = None
+    # Backend marker persisted into restore_config on READY (e.g. "fsb") so
+    # create-time routing can send restores to the owning backend.
+    backend: Optional[str] = None
+
+
+# Reason on a FAILED SnapshotRuntimeStatus when the runtime refused the create
+# because the source sandbox is already held by another snapshot (re-entry
+# fence). Surfaced as 409 instead of 500 by the synchronous create path.
+SNAPSHOT_CREATE_CONFLICT_REASON = "snapshot_runtime_create_conflict"
 
 
 class SnapshotRuntimePreflightError(RuntimeError):
@@ -48,6 +57,12 @@ class SnapshotRuntime(Protocol):
     def supports_create_snapshot(self) -> bool:
         """
         Whether this runtime supports creating snapshots.
+        """
+
+    def supports_synchronous_create(self) -> bool:
+        """
+        Whether ``create_snapshot`` is a fast, idempotent submit that can run
+        inline before the snapshot row is persisted.
         """
 
     def create_snapshot_unsupported_message(self) -> str:
@@ -79,12 +94,29 @@ class SnapshotRuntime(Protocol):
         Return the most recent runtime view for a snapshot if known.
         """
 
-    def delete_snapshot(self, snapshot_id: str, image: Optional[str] = None, *, namespace: str | None = None) -> None:
+    def delete_snapshot(
+        self,
+        snapshot_id: str,
+        image: Optional[str] = None,
+        *,
+        namespace: str | None = None,
+        source_sandbox_id: str | None = None,
+    ) -> None:
         """
         Delete runtime-managed artifacts for a snapshot.
+
+        ``source_sandbox_id`` identifies the owning backend for composite
+        dispatch; runtimes that serve one backend only ignore it.
         """
 
-    def inspect_snapshot(self, snapshot_id: str, image: Optional[str] = None, *, namespace: str | None = None) -> SnapshotRuntimeStatus:
+    def inspect_snapshot(
+        self,
+        snapshot_id: str,
+        image: Optional[str] = None,
+        *,
+        namespace: str | None = None,
+        source_sandbox_id: str | None = None,
+    ) -> SnapshotRuntimeStatus:
         """
         Inspect runtime-managed artifacts for startup recovery.
         """
@@ -96,6 +128,9 @@ class NoopSnapshotRuntime:
     """
 
     def supports_create_snapshot(self) -> bool:
+        return False
+
+    def supports_synchronous_create(self) -> bool:
         return False
 
     def create_snapshot_unsupported_message(self) -> str:
@@ -123,10 +158,24 @@ class NoopSnapshotRuntime:
     def get_snapshot_status(self, snapshot_id: str) -> Optional[SnapshotRuntimeStatus]:
         return None
 
-    def delete_snapshot(self, snapshot_id: str, image: Optional[str] = None, *, namespace: str | None = None) -> None:
+    def delete_snapshot(
+        self,
+        snapshot_id: str,
+        image: Optional[str] = None,
+        *,
+        namespace: str | None = None,
+        source_sandbox_id: str | None = None,
+    ) -> None:
         return None
 
-    def inspect_snapshot(self, snapshot_id: str, image: Optional[str] = None, *, namespace: str | None = None) -> SnapshotRuntimeStatus:
+    def inspect_snapshot(
+        self,
+        snapshot_id: str,
+        image: Optional[str] = None,
+        *,
+        namespace: str | None = None,
+        source_sandbox_id: str | None = None,
+    ) -> SnapshotRuntimeStatus:
         return SnapshotRuntimeStatus(
             state=SnapshotState.FAILED,
             reason="snapshot_recovery_not_supported",
@@ -135,6 +184,7 @@ class NoopSnapshotRuntime:
 
 
 __all__ = [
+    "SNAPSHOT_CREATE_CONFLICT_REASON",
     "SnapshotRuntime",
     "SnapshotRuntimePreflightError",
     "SnapshotRuntimeStatus",

@@ -1,3 +1,17 @@
+// Copyright 2026 The OpenSandbox Authors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 import assert from "node:assert/strict";
 import test from "node:test";
 
@@ -231,7 +245,6 @@ for (const creator of ["SDK instance", "custom object"]) {
       creationSpec: { image: "ubuntu", adapterFactory: fixture.adapterFactory },
       sandboxCreator: fixture.sandboxCreator,
       warmupReadyTimeoutSeconds: 0.02,
-      reconcileIntervalSeconds: 0.01,
       warmupHealthCheck: sandbox => sandbox.id === "warm-1" ? pending.promise : true,
     });
     t.after(async () => {
@@ -338,7 +351,6 @@ test("SandboxPool warms, acquires, renews, and replenishes an idle sandbox", asy
     poolName: "unit-pool",
     maxIdle: 2,
     warmupConcurrency: 2,
-    reconcileIntervalSeconds: 60,
     connectionConfig: fixture.connectionConfig,
     creationSpec: { image: "ubuntu", adapterFactory: fixture.adapterFactory },
     sandboxCreator: fixture.sandboxCreator,
@@ -404,7 +416,6 @@ test("SandboxPool renews primary ownership while warmup creation is in flight", 
     maxIdle: 1,
     stateStore: store,
     primaryLockTtlSeconds: 0.3,
-    reconcileIntervalSeconds: 60,
     connectionConfig: fixture.connectionConfig,
     creationSpec: { image: "ubuntu", adapterFactory: fixture.adapterFactory },
     sandboxCreator: async (context) => {
@@ -486,7 +497,6 @@ test("SandboxPool resize and releaseAllIdle update observable state", async () =
     poolName: "resize-pool",
     maxIdle: 1,
     stateStore: store,
-    reconcileIntervalSeconds: 60,
     connectionConfig: fixture.connectionConfig,
     creationSpec: { image: "ubuntu", adapterFactory: fixture.adapterFactory },
     sandboxCreator: fixture.sandboxCreator,
@@ -561,6 +571,43 @@ test("renew failure is terminal and does not consume another idle sandbox", asyn
   await pool.shutdown();
 });
 
+test("an acquire from a retired run cannot consume idle from a restarted run", async () => {
+  const fixture = createPoolFixture();
+  const store = new InMemoryPoolStateStore();
+  const oldCheckStarted = deferred();
+  const oldCheckGate = deferred();
+  const pool = SandboxPool.create({
+    poolName: "retired-acquire-pool",
+    maxIdle: 0,
+    stateStore: store,
+    connectionConfig: fixture.connectionConfig,
+    creationSpec: { image: "ubuntu", adapterFactory: fixture.adapterFactory },
+    acquireHealthCheck: async (sandbox) => {
+      if (sandbox.id === "old") {
+        oldCheckStarted.resolve();
+        await oldCheckGate.promise;
+        return false;
+      }
+      return true;
+    },
+    acquireReadyTimeoutSeconds: 0.02,
+    acquireHealthCheckPollingIntervalMillis: 1,
+  });
+
+  await pool.start();
+  await store.putIdle("retired-acquire-pool", "old");
+  const oldAcquire = pool.acquire({ policy: AcquirePolicy.RETRY_NEXT_IDLE });
+  await oldCheckStarted.promise;
+  await pool.shutdown(false);
+  await pool.start();
+  await store.putIdle("retired-acquire-pool", "new");
+  oldCheckGate.resolve();
+
+  await assert.rejects(oldAcquire, /is not running/);
+  assert.deepEqual((await pool.snapshotIdleEntries()).map((entry) => entry.sandboxId), ["new"]);
+  await pool.shutdown(false);
+});
+
 test("forced shutdown does not wait for a creator that ignores cancellation", async () => {
   const fixture = createPoolFixture();
   let creatorStarted;
@@ -586,6 +633,30 @@ test("forced shutdown does not wait for a creator that ignores cancellation", as
 
   releaseCreator();
   await eventually(async () => fixture.calls.some((call) => call.method === "creator-kill"));
+});
+
+test("forced shutdown aborts a preparer that ignores cancellation and cleans the sandbox", async () => {
+  const fixture = createPoolFixture();
+  const preparerStarted = deferred();
+  const preparerGate = deferred();
+  const pool = SandboxPool.create({
+    poolName: "forced-preparer-pool",
+    maxIdle: 1,
+    connectionConfig: fixture.connectionConfig,
+    creationSpec: { image: "ubuntu", adapterFactory: fixture.adapterFactory },
+    sandboxCreator: fixture.sandboxCreator,
+    warmupSandboxPreparer: async () => {
+      preparerStarted.resolve();
+      await preparerGate.promise;
+    },
+  });
+
+  await pool.start();
+  await preparerStarted.promise;
+  await pool.shutdown(false);
+  await eventually(async () => fixture.calls.some((call) => call.method === "creator-kill"));
+  assert.equal((await pool.snapshot()).inFlightOperations, 0);
+  preparerGate.resolve();
 });
 
 test("acquire disposes a sandbox if forced shutdown retires the pool run", async () => {
@@ -619,4 +690,46 @@ test("acquire disposes a sandbox if forced shutdown retires the pool run", async
 
   await assert.rejects(acquire, /is not running/);
   await eventually(async () => fixture.calls.some((call) => call.method === "kill" && call.sandboxId === "idle"));
+});
+
+test("pool warmup create uses a metrics-disabled connection config", async (t) => {
+  const captured = [];
+  const fixture = createPoolFixture();
+  const connectionConfig = new ConnectionConfig({ domain: "http://127.0.0.1:8080" });
+  const sandboxCreator = async (context) => {
+    captured.push({
+      reason: context.reason,
+      disableMetrics: context.createConnectionConfig.disableMetrics,
+    });
+    return fixture.sandboxCreator(context);
+  };
+
+  const warmupPool = SandboxPool.create({
+    poolName: "warmup-metrics-pool",
+    maxIdle: 1,
+    stateStore: new InMemoryPoolStateStore(),
+    connectionConfig,
+    creationSpec: { image: "ubuntu" },
+    sandboxCreator,
+  });
+  t.after(() => warmupPool.shutdown(false));
+  await warmupPool.start();
+
+  await eventually(() => captured.some((entry) => entry.reason === PooledSandboxCreateReason.WARMUP));
+
+  const acquirePool = SandboxPool.create({
+    poolName: "acquire-metrics-pool",
+    maxIdle: 0,
+    stateStore: new InMemoryPoolStateStore(),
+    connectionConfig,
+    creationSpec: { image: "ubuntu" },
+    sandboxCreator,
+  });
+  t.after(() => acquirePool.shutdown(false));
+  await acquirePool.start();
+  await acquirePool.acquire({ policy: AcquirePolicy.DIRECT_CREATE, skipHealthCheck: true });
+
+  assert.equal(captured.find((entry) => entry.reason === PooledSandboxCreateReason.WARMUP).disableMetrics, true);
+  assert.equal(captured.find((entry) => entry.reason === PooledSandboxCreateReason.DIRECT_CREATE).disableMetrics, false);
+  assert.equal(connectionConfig.disableMetrics, false);
 });

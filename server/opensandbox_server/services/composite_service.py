@@ -1,4 +1,4 @@
-# Copyright 2026 Alibaba Group Holding Ltd.
+# Copyright 2026 The OpenSandbox Authors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -28,7 +28,7 @@ from opensandbox_server.api.schema import (
     RenewSandboxExpirationResponse,
     Sandbox,
 )
-from opensandbox_server.services.diagnostics import DiagnosticResult
+from opensandbox_server.services.diagnostics import DiagnosticContext, DiagnosticResult
 from opensandbox_server.services.extension_service import ExtensionService
 from opensandbox_server.services.fast_sandbox.service import FastSandboxService
 from opensandbox_server.services.k8s.kubernetes_service import KubernetesSandboxService
@@ -42,6 +42,11 @@ class CompositeSandboxService(SandboxService, ExtensionService):
     def __init__(self, kubernetes: KubernetesSandboxService, fsb: FastSandboxService):
         self._kubernetes = kubernetes
         self._fsb = fsb
+
+    @property
+    def fsb_service(self) -> FastSandboxService:
+        """The fsb backend, for background integrations."""
+        return self._fsb
 
     def _backend(self, sandbox_id: str) -> KubernetesSandboxService | FastSandboxService:
         return self._fsb if sandbox_id.startswith("fsb-") else self._kubernetes
@@ -57,8 +62,12 @@ class CompositeSandboxService(SandboxService, ExtensionService):
     async def create_sandbox(self, request: CreateSandboxRequest) -> CreateSandboxResponse:
         # templateId is the unambiguous fsb selector: fsb sandboxes are
         # the microVM catalog and coexist with the container-sandbox
-        # workload provider; every other create stays with it.
+        # workload provider. A snapshotId resolved to an fsb-produced
+        # artifact (restore_config.backend == "fsb") selects fsb the same
+        # way; every other create stays with it.
         if (request.template_id or "").strip():
+            return await self._fsb.create_sandbox(request)
+        if (request.snapshot_id or "").strip() and request.resolved_snapshot_backend == "fsb":
             return await self._fsb.create_sandbox(request)
         return await self._kubernetes.create_sandbox(request)
 
@@ -70,7 +79,7 @@ class CompositeSandboxService(SandboxService, ExtensionService):
         except HTTPException:
             raise
         except Exception as exc:
-            logger.warning("Cannot read complete sandbox list: %s", exc)
+            logger.warning(f"Cannot read complete sandbox list: {exc}")
             raise HTTPException(
                 503,
                 detail={
@@ -122,8 +131,43 @@ class CompositeSandboxService(SandboxService, ExtensionService):
     def replace_network_policy(self, sandbox_id: str, policy: NetworkPolicy) -> dict:
         return self._fsb.replace_network_policy(sandbox_id, policy)
 
+    def patch_network_policy(self, sandbox_id: str, rules: list) -> dict:
+        return self._fsb.patch_network_policy(sandbox_id, rules)
+
+    def delete_network_policy_rules(self, sandbox_id: str, targets: list) -> dict:
+        return self._fsb.delete_network_policy_rules(sandbox_id, targets)
+
+    # -- credential vault (fsb relay only, OSEP-0022) -----------------------
+
+    def create_credential_vault(self, sandbox_id: str, request) -> dict:
+        return self._fsb.create_credential_vault(sandbox_id, request)
+
+    def get_credential_vault(self, sandbox_id: str) -> dict:
+        return self._fsb.get_credential_vault(sandbox_id)
+
+    def patch_credential_vault(self, sandbox_id: str, request) -> dict:
+        return self._fsb.patch_credential_vault(sandbox_id, request)
+
+    def delete_credential_vault(self, sandbox_id: str) -> None:
+        self._fsb.delete_credential_vault(sandbox_id)
+
+    def list_credential_vault_credentials(self, sandbox_id: str) -> dict:
+        return self._fsb.list_credential_vault_credentials(sandbox_id)
+
+    def get_credential_vault_credential(self, sandbox_id: str, name: str) -> dict:
+        return self._fsb.get_credential_vault_credential(sandbox_id, name)
+
+    def list_credential_vault_bindings(self, sandbox_id: str) -> dict:
+        return self._fsb.list_credential_vault_bindings(sandbox_id)
+
+    def get_credential_vault_binding(self, sandbox_id: str, name: str) -> dict:
+        return self._fsb.get_credential_vault_binding(sandbox_id, name)
+
     def get_sandbox_log_diagnostics(self, sandbox_id: str, scope: str) -> DiagnosticResult:
         return self._backend(sandbox_id).get_sandbox_log_diagnostics(sandbox_id, scope)
+
+    def get_sandbox_diagnostic_context(self, sandbox_id: str) -> DiagnosticContext:
+        return self._backend(sandbox_id).get_sandbox_diagnostic_context(sandbox_id)
 
     def get_sandbox_event_diagnostics(self, sandbox_id: str, scope: str) -> DiagnosticResult:
         return self._backend(sandbox_id).get_sandbox_event_diagnostics(sandbox_id, scope)

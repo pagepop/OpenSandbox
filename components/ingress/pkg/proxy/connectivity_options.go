@@ -1,4 +1,4 @@
-// Copyright 2026 Alibaba Group Holding Ltd.
+// Copyright 2026 The OpenSandbox Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -18,22 +18,36 @@ import (
 	"net"
 	"net/http"
 
-	"github.com/gorilla/websocket"
-
+	"github.com/alibaba/opensandbox/ingress/pkg/activity"
 	"github.com/alibaba/opensandbox/ingress/pkg/proxy/connectivity"
+	"github.com/alibaba/opensandbox/ingress/pkg/wake"
 )
 
 // Option configures optional proxy behavior without changing existing callers.
 type Option func(*proxyOptions)
 
 type proxyOptions struct {
-	connectObserver connectivity.Observer
+	connectObserver           connectivity.Observer
+	webSocketMessageSizeLimit int64
+	activity                  activity.Recorder
+	waker                     *wake.Waker
 }
 
 // WithConnectObserver observes HTTP and WebSocket TCP connection attempts.
 func WithConnectObserver(observer connectivity.Observer) Option {
 	return func(options *proxyOptions) {
 		options.connectObserver = observer
+	}
+}
+
+// WithWebSocketMessageSizeLimit sets the maximum size, in bytes, of one
+// WebSocket message in either relay direction. Non-positive values are ignored
+// so callers cannot accidentally disable the safety limit.
+func WithWebSocketMessageSizeLimit(limit int64) Option {
+	return func(options *proxyOptions) {
+		if limit > 0 {
+			options.webSocketMessageSizeLimit = limit
+		}
 	}
 }
 
@@ -56,13 +70,26 @@ func newObservedHTTPTransport(observer connectivity.Observer) http.RoundTripper 
 	return transport
 }
 
-func newObservedWebSocketDialer(observer connectivity.Observer) *websocket.Dialer {
+// newObservedWebSocketHTTPClient returns the *http.Client that coder/websocket
+// uses to dial backends. Its Transport's DialContext is wrapped so each TCP
+// connection attempt is recorded by the connectivity observer under the
+// "websocket" protocol label, matching the metrics dimensions the gorilla-based
+// implementation used to emit.
+func newObservedWebSocketHTTPClient(observer connectivity.Observer) *http.Client {
 	if observer == nil {
 		return nil
 	}
 
-	dialer := *websocket.DefaultDialer
-	baseDialer := &net.Dialer{}
-	dialer.NetDialContext = connectivity.WrapDialContext(baseDialer.DialContext, observer, "websocket")
-	return &dialer
+	baseTransport, ok := http.DefaultTransport.(*http.Transport)
+	if !ok {
+		return nil
+	}
+	transport := baseTransport.Clone()
+	baseDialContext := transport.DialContext
+	if baseDialContext == nil {
+		baseDialer := &net.Dialer{}
+		baseDialContext = baseDialer.DialContext
+	}
+	transport.DialContext = connectivity.WrapDialContext(baseDialContext, observer, "websocket")
+	return &http.Client{Transport: transport}
 }

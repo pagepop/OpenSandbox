@@ -1,4 +1,4 @@
-// Copyright 2025 Alibaba Group Holding Ltd.
+// Copyright 2025 The OpenSandbox Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -50,7 +50,7 @@ func (c *Controller) runCommand(ctx context.Context, request *ExecuteCodeRequest
 	}()
 
 	startAt := time.Now()
-	log.Info("received command: %v", log.SanitizeCommand(request.commandContent()))
+	log.Info("command: received %v", log.SanitizeCommand(request.commandContent()))
 	cmd, err := prepareCommand(ctx, request)
 	if err != nil {
 		return fmt.Errorf("resolve cwd: %w", err)
@@ -76,7 +76,7 @@ func (c *Controller) runCommand(ctx context.Context, request *ExecuteCodeRequest
 		close(done)
 		wg.Wait()
 		request.Hooks.OnExecuteError(&execute.ErrorOutput{EName: "CommandExecError", EValue: err.Error()})
-		log.Error("CommandExecError: error starting commands: %v", err)
+		log.Error("command: start failed: %v", err)
 		return nil
 	}
 
@@ -97,6 +97,7 @@ func (c *Controller) runCommand(ctx context.Context, request *ExecuteCodeRequest
 	if err != nil {
 		var eName, eValue string
 		eCode := 1
+		var exitCodePtr *int
 		var traceback []string
 
 		var exitError *exec.ExitError
@@ -105,6 +106,7 @@ func (c *Controller) runCommand(ctx context.Context, request *ExecuteCodeRequest
 			eName = "CommandExecError"
 			eValue = strconv.Itoa(exitCode)
 			eCode = exitCode
+			exitCodePtr = &exitCode
 		} else {
 			eName = "CommandExecError"
 			eValue = err.Error()
@@ -115,9 +117,10 @@ func (c *Controller) runCommand(ctx context.Context, request *ExecuteCodeRequest
 			EName:     eName,
 			EValue:    eValue,
 			Traceback: traceback,
+			ExitCode:  exitCodePtr,
 		})
 
-		log.Error("CommandExecError: error running commands: %v", err)
+		log.Error("command: run failed: %v", err)
 		c.markCommandFinished(session, eCode, err.Error())
 		return nil
 	}
@@ -139,9 +142,10 @@ func (c *Controller) runBackgroundCommand(ctx context.Context, cancel context.Ca
 	stderrPath := c.combinedOutputFileName(session)
 
 	startAt := time.Now()
-	log.Info("received command: %v", log.SanitizeCommand(request.commandContent()))
+	log.Info("command: received %v", log.SanitizeCommand(request.commandContent()))
 	cmd, err := prepareCommand(ctx, request)
 	if err != nil {
+		pipe.Close() // best-effort
 		return fmt.Errorf("resolve cwd: %w", err)
 	}
 
@@ -156,7 +160,7 @@ func (c *Controller) runBackgroundCommand(ctx context.Context, cancel context.Ca
 	// callers find the session immediately.
 	err = cmd.Start()
 	if err != nil {
-		log.Error("CommandExecError: error starting commands: %v", err)
+		log.Error("command: start failed: %v", err)
 		pipe.Close() // best-effort
 		cancel()
 		return fmt.Errorf("failed to start commands: %w", err)
@@ -187,7 +191,7 @@ func (c *Controller) runBackgroundCommand(ctx context.Context, cancel context.Ca
 		devNull.Close() // best-effort
 
 		if err != nil {
-			log.Error("CommandExecError: error running commands: %v", err)
+			log.Error("command: run failed: %v", err)
 			exitCode := 1
 			var exitError *exec.ExitError
 			if errors.As(err, &exitError) {

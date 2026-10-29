@@ -1,4 +1,4 @@
-// Copyright 2025 Alibaba Group Holding Ltd.
+// Copyright 2025 The OpenSandbox Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -54,7 +54,6 @@ func (c *Controller) tailStdPipe(file string, onExecute func(text string), done 
 	}
 }
 
-// getCommandKernel retrieves a command execution context.
 func (c *Controller) getCommandKernel(sessionID string) *commandKernel {
 	if v, ok := c.commandClientMap.Load(sessionID); ok {
 		if kernel, ok := v.(*commandKernel); ok {
@@ -64,7 +63,6 @@ func (c *Controller) getCommandKernel(sessionID string) *commandKernel {
 	return nil
 }
 
-// storeCommandKernel registers a command execution context.
 func (c *Controller) storeCommandKernel(sessionID string, kernel *commandKernel) {
 	c.commandClientMap.Store(sessionID, kernel)
 }
@@ -104,12 +102,10 @@ func (c *Controller) commandOutputDir() string {
 	return filepath.Join(os.TempDir(), commandOutputDirName)
 }
 
-// stdoutFileName constructs the stdout log path.
 func (c *Controller) stdoutFileName(session string) string {
 	return filepath.Join(c.commandOutputDir(), session+".stdout")
 }
 
-// stderrFileName constructs the stderr log path.
 func (c *Controller) stderrFileName(session string) string {
 	return filepath.Join(c.commandOutputDir(), session+".stderr")
 }
@@ -128,8 +124,20 @@ func removeCommandOutputFiles(paths ...string) {
 			continue
 		}
 		seen[path] = struct{}{}
+		// Truncate before unlinking: forked children may outlive the command
+		// while still holding the output fd, so the unlinked inode's data
+		// blocks would stay allocated (invisible "(deleted)" growth) until the
+		// last holder exits. Truncation releases them immediately, without
+		// needing to track or kill grandchildren. The helper never follows
+		// symlinks: a workload can swap the entry between a directory scan and
+		// this call, and a following truncate would zero an arbitrary file
+		// where the remove below would only unlink the link.
+		// See opensandbox-group/OpenSandbox#2291.
+		if err := truncateCommandOutputFile(path); err != nil && !os.IsNotExist(err) {
+			log.Warn("command output: truncate %s: %v", path, err)
+		}
 		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-			log.Warn("remove command output %s: %v", path, err)
+			log.Warn("command output: remove %s: %v", path, err)
 		}
 	}
 }
@@ -138,7 +146,7 @@ func cleanupStaleCommandOutputFiles(dir string, cutoff time.Time, match func(str
 	directory, err := os.Open(dir)
 	if err != nil {
 		if !os.IsNotExist(err) {
-			log.Warn("read command output directory %s: %v", dir, err)
+			log.Warn("command output: read dir %s: %v", dir, err)
 		}
 		return
 	}
@@ -158,7 +166,7 @@ func cleanupStaleCommandOutputFiles(dir string, cutoff time.Time, match func(str
 		}
 		if readErr != nil {
 			if readErr != io.EOF {
-				log.Warn("read command output directory %s: %v", dir, readErr)
+				log.Warn("command output: read dir %s: %v", dir, readErr)
 			}
 			return
 		}
@@ -205,7 +213,7 @@ func (c *Controller) cleanupOrphanedCommandOutputs(now time.Time) {
 	cutoff := now.Add(-commandOutputRetention)
 	protected := c.protectedCommandOutputPaths()
 	if err := ensurePrivateCommandOutputDir(c.commandOutputDir()); err != nil {
-		log.Warn("skip private command output cleanup: %v", err)
+		log.Warn("command output: skip private cleanup: %v", err)
 	} else {
 		cleanupStaleCommandOutputFiles(c.commandOutputDir(), cutoff, legacyCommandOutputPattern.MatchString, protected)
 	}
@@ -242,9 +250,8 @@ func (c *Controller) StartCommandOutputJanitor(ctx context.Context) error {
 // commandOutputTail retains an unfinished line while reading only appended bytes.
 // Each stdout/stderr tail goroutine owns its own state.
 type commandOutputTail struct {
-	offset    int64
-	pending   bytes.Buffer
-	lastWasCR bool
+	offset  int64
+	pending bytes.Buffer
 }
 
 func (t *commandOutputTail) read(path string, onExecute func(string), flushIncomplete bool) {
@@ -269,23 +276,11 @@ func (t *commandOutputTail) read(path string, onExecute func(string), flushIncom
 			break
 		}
 		t.offset++
-
-		if b == '\n' || b == '\r' {
-			switch {
-			case t.pending.Len() > 0:
-				onExecute(t.pending.String())
-				t.pending.Reset()
-			case b == '\n' && t.lastWasCR:
-				// The preceding CR already emitted this line.
-			default:
-				onExecute("\n")
-			}
-			t.lastWasCR = b == '\r'
-			continue
-		}
-
-		t.lastWasCR = false
 		t.pending.WriteByte(b)
+		if b == '\n' || b == '\r' {
+			onExecute(t.pending.String())
+			t.pending.Reset()
+		}
 	}
 	// Reuse storage within a poll, but release completed long lines between polls.
 	if t.pending.Len() == 0 {

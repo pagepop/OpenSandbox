@@ -1,4 +1,4 @@
-# Copyright 2025 Alibaba Group Holding Ltd.
+# Copyright 2025 The OpenSandbox Authors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,7 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-FROM golang:1.25.9 AS builder
+FROM golang:1.26.10-bookworm@sha256:23ce71337b726608afb1bc00986e630a05034a87a87ea1fc2cd1ae5cf33387eb AS builder
+ENV GOTOOLCHAIN=local
 
 WORKDIR /build
 
@@ -74,8 +75,9 @@ RUN CGO_ENABLED=0 GOOS=windows go build ${GOFLAGS} -trimpath -buildvcs=false \
     -o /build/execd.exe ./main.go
 
 # Build static bubblewrap with musl.
-FROM alpine:latest AS bwrap-builder
-RUN apk add --no-cache git musl-dev meson ninja gcc libcap-dev libcap-static pkgconfig bash
+FROM alpine:3.24@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a AS bwrap-builder
+RUN apk add --no-cache 'ca-certificates>=20261020-r0' git musl-dev meson ninja gcc libcap-dev libcap-static pkgconfig bash \
+    && update-ca-certificates
 COPY components/execd/native/session-gate.c /build/session-gate.c
 RUN gcc -Os -static -s -Wall -Wextra -Werror \
     -o /build/opensandbox-session-gate /build/session-gate.c
@@ -108,12 +110,16 @@ RUN rm /usr/lib/libcap.so /usr/lib/libcap.so.2 && \
 # touch (resolved by name against the target kernel BTF at load time), so
 # no per-arch vmlinux.h or host kernel BTF is needed — this stage is fully
 # hermetic and cross-compiles for every TARGETARCH.
-FROM golang:1.25.9 AS ebpf-builder
+FROM golang:1.26.10-bookworm@sha256:23ce71337b726608afb1bc00986e630a05034a87a87ea1fc2cd1ae5cf33387eb AS ebpf-builder
+ENV GOTOOLCHAIN=local
 ARG VERSION=dev
 ARG GIT_COMMIT=unknown
 ARG BUILD_TIME=unknown
 ARG TARGETARCH
-RUN apt-get update && apt-get install -y --no-install-recommends clang
+RUN apt-get update && apt-get install -y --no-install-recommends clang ca-certificates \
+    && dpkg --compare-versions "$(dpkg-query -W -f='${Version}' ca-certificates)" ge 20250419~deb12u2 \
+    && update-ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
 WORKDIR /build
 COPY components/internal/go.mod components/internal/go.sum ./components/internal/
 COPY components/execd/go.mod components/execd/go.sum ./components/execd/
@@ -139,9 +145,10 @@ RUN CGO_ENABLED=0 go build -tags ebpf -trimpath -buildvcs=false \
               -X 'github.com/alibaba/opensandbox/internal/version.GitCommit=${GIT_COMMIT}'" \
     -o /build/execd-ebpf ./main.go
 
-FROM alpine:latest
+FROM alpine:3.24@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a
 
-RUN apk add --no-cache nss-tools
+RUN apk add --no-cache 'ca-certificates>=20261020-r0' nss-tools \
+    && update-ca-certificates
 
 COPY --from=bwrap-builder --chown=0:0 /build/bwrap/bwrap /usr/local/bin/bwrap
 COPY --from=bwrap-builder --chown=0:0 /build/opensandbox-session-gate /usr/local/libexec/opensandbox-session-gate

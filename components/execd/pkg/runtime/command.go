@@ -1,4 +1,4 @@
-// Copyright 2025 Alibaba Group Holding Ltd.
+// Copyright 2025 The OpenSandbox Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -106,13 +106,18 @@ func buildCredential(uid, gid *uint32) (*syscall.Credential, error) {
 		return nil, nil //nolint:nilnil
 	}
 
+	// An explicit uid/gid matching the identity execd already runs as needs
+	// no credential switch: return nil so the launch stays on the plain exec
+	// path, which is also what the no-uid request already does (#1802).
+	if sameIdentityRequest(uid, gid) {
+		return nil, nil //nolint:nilnil
+	}
+
 	cred := &syscall.Credential{}
 	if uid != nil {
 		cred.Uid = *uid
-		// Load user info to get primary GID and supplemental groups
 		u, err := user.LookupId(strconv.FormatUint(uint64(*uid), 10))
 		if err == nil {
-			// Set primary GID if not explicitly provided
 			if gid == nil {
 				primaryGid, err := strconv.ParseUint(u.Gid, 10, 32)
 				if err == nil {
@@ -120,7 +125,6 @@ func buildCredential(uid, gid *uint32) (*syscall.Credential, error) {
 				}
 			}
 
-			// Load supplemental groups
 			gids, err := u.GroupIds()
 			if err == nil {
 				for _, g := range gids {
@@ -133,12 +137,79 @@ func buildCredential(uid, gid *uint32) (*syscall.Credential, error) {
 		}
 	}
 
-	// Override Gid if explicitly provided
 	if gid != nil {
 		cred.Gid = *gid
 	}
 
 	return cred, nil
+}
+
+// sameIdentityRequest reports whether the requested uid/gid matches the
+// identity execd already runs with, making the credential machinery a
+// provable no-op. A non-nil Credential always makes the child call setgroups
+// (even when every id matches), and setgroups requires CAP_SETGID no matter
+// what values are requested — so same-identity credentials fail with
+// "fork/exec ...: operation not permitted" inside sandboxes that drop
+// capabilities (#1802). A uid-only request skips the switch only when the
+// user entry's primary GID and supplemental groups match the daemon's own.
+func sameIdentityRequest(uid, gid *uint32) bool {
+	currentUID := uint32(os.Getuid())
+	currentGID := uint32(os.Getgid())
+	if (uid == nil || *uid == currentUID) && (gid == nil || *gid == currentGID) {
+		if gid != nil || uid == nil {
+			return true
+		}
+		return sameProcessGroups(*uid)
+	}
+	return false
+}
+
+// credentialStartHint annotates command launch failures that happen while
+// switching identity. With capabilities dropped the kernel rejects the
+// child's setgroups/setgid/setuid calls, and the raw error surfaces as a
+// bare "fork/exec ...: operation not permitted" that gives the caller no
+// way to discover the missing grant (#1802).
+func credentialStartHint(err error, cred *syscall.Credential) error {
+	if cred == nil || !errors.Is(err, os.ErrPermission) {
+		return err
+	}
+	return fmt.Errorf(
+		"%w (switching to uid=%d gid=%d requires CAP_SETUID/CAP_SETGID, which this sandbox may not have — check the server's docker.drop_capabilities configuration; dropping these capabilities makes every identity switch fail)",
+		err, cred.Uid, cred.Gid,
+	)
+}
+
+// sameProcessGroups reports whether the given uid's user entry resolves to
+// the primary GID and supplemental groups the daemon already runs with, i.e.
+// whether building a credential for that uid would be a no-op group-wise.
+func sameProcessGroups(uid uint32) bool {
+	u, err := user.LookupId(strconv.FormatUint(uint64(uid), 10))
+	if err != nil {
+		return false
+	}
+	primaryGid, err := strconv.ParseUint(u.Gid, 10, 32)
+	if err != nil || uint32(primaryGid) != uint32(os.Getgid()) {
+		return false
+	}
+	entryGroups, err := u.GroupIds()
+	if err != nil {
+		return false
+	}
+	processGroups, err := syscall.Getgroups()
+	if err != nil || len(entryGroups) != len(processGroups) {
+		return false
+	}
+	seen := make(map[uint32]bool, len(processGroups))
+	for _, g := range processGroups {
+		seen[uint32(g)] = true
+	}
+	for _, g := range entryGroups {
+		id, err := strconv.ParseUint(g, 10, 32)
+		if err != nil || !seen[uint32(id)] {
+			return false
+		}
+	}
+	return true
 }
 
 // runCommand executes shell commands and streams their output.
@@ -161,13 +232,12 @@ func (c *Controller) runCommand(ctx context.Context, request *ExecuteCodeRequest
 	}()
 
 	startAt := time.Now()
-	log.Info("received command: %v", log.SanitizeCommand(request.commandContent()))
+	log.Info("command: received %v", log.SanitizeCommand(request.commandContent()))
 	cmd, err := prepareCommand(ctx, request)
 	if err != nil {
 		return fmt.Errorf("resolve request cwd %s: %w", request.Cwd, err)
 	}
 
-	// Configure credentials and process group
 	cred, err := buildCredential(request.Uid, request.Gid)
 	if err != nil {
 		return fmt.Errorf("failed to build credential: %w", err)
@@ -196,13 +266,14 @@ func (c *Controller) runCommand(ctx context.Context, request *ExecuteCodeRequest
 	if err != nil {
 		close(done)
 		wg.Wait()
+		startErr := credentialStartHint(err, cred)
 		request.Hooks.OnExecuteInit(session)
 		request.Hooks.OnExecuteError(&execute.ErrorOutput{
 			EName:     "CommandExecError",
-			EValue:    err.Error(),
-			Traceback: []string{err.Error()},
+			EValue:    startErr.Error(),
+			Traceback: []string{startErr.Error()},
 		})
-		log.Error("CommandExecError: error starting commands: %v", err)
+		log.Error("command: start failed: %v", startErr)
 		return nil
 	}
 
@@ -266,6 +337,7 @@ func (c *Controller) runCommand(ctx context.Context, request *ExecuteCodeRequest
 	if err != nil {
 		var eName, eValue string
 		var eCode int
+		var exitCodePtr *int
 		var traceback []string
 
 		var exitCodeErr exitCoder
@@ -274,6 +346,7 @@ func (c *Controller) runCommand(ctx context.Context, request *ExecuteCodeRequest
 			eName = "CommandExecError"
 			eValue = strconv.Itoa(exitCode)
 			eCode = exitCode
+			exitCodePtr = &exitCode
 		} else {
 			eName = "CommandExecError"
 			eValue = err.Error()
@@ -285,9 +358,10 @@ func (c *Controller) runCommand(ctx context.Context, request *ExecuteCodeRequest
 			EName:     eName,
 			EValue:    eValue,
 			Traceback: traceback,
+			ExitCode:  exitCodePtr,
 		})
 
-		log.Error("CommandExecError: error running commands: %v", err)
+		log.Error("command: run failed: %v", err)
 		c.markCommandFinished(session, eCode, err.Error())
 		return nil
 	}
@@ -316,17 +390,18 @@ func (c *Controller) runBackgroundCommand(ctx context.Context, cancel context.Ca
 	defer stopSignals()
 
 	startAt := time.Now()
-	log.Info("received command: %v", log.SanitizeCommand(request.commandContent()))
+	log.Info("command: received %v", log.SanitizeCommand(request.commandContent()))
 	cmd, err := prepareCommand(ctx, request)
 	if err != nil {
 		cancel()
+		_ = pipe.Close()
 		return fmt.Errorf("resolve cwd: %w", err)
 	}
 
-	// Configure credentials and process group
 	cred, err := buildCredential(request.Uid, request.Gid)
 	if err != nil {
 		cancel()
+		_ = pipe.Close()
 		return fmt.Errorf("build credential: %w", err)
 	}
 	cmd.SysProcAttr = &syscall.SysProcAttr{
@@ -356,11 +431,13 @@ func (c *Controller) runBackgroundCommand(ctx context.Context, cancel context.Ca
 	}
 	if err != nil {
 		cancel()
-		log.Error("CommandExecError: error starting commands: %v", err)
+		_ = pipe.Close()
+		startErr := credentialStartHint(err, cred)
+		log.Error("command: start failed: %v", startErr)
 		kernel.running = false
 		c.storeCommandKernel(session, kernel)
-		c.markCommandFinished(session, 255, err.Error())
-		return fmt.Errorf("failed to start commands: %w", err)
+		c.markCommandFinished(session, 255, startErr.Error())
+		return fmt.Errorf("failed to start commands: %w", startErr)
 	}
 
 	// Register the kernel synchronously so that GetCommandStatus callers
@@ -370,13 +447,15 @@ func (c *Controller) runBackgroundCommand(ctx context.Context, cancel context.Ca
 	kernel.pid = cmd.Process.Pid
 	c.storeCommandKernel(session, kernel)
 
+	done := make(chan struct{})
 	safego.Go(func() {
 		defer pipe.Close()
 
 		err = mp.Wait()
+		close(done)
 		cancel()
 		if err != nil {
-			log.Error("CommandExecError: error running commands: %v", err)
+			log.Error("command: run failed: %v", err)
 			exitCode := 1
 			var exitCodeErr exitCoder
 			if errors.As(err, &exitCodeErr) {
@@ -390,9 +469,22 @@ func (c *Controller) runBackgroundCommand(ctx context.Context, cancel context.Ca
 
 	// ensure we kill the whole process group if the context is cancelled (e.g., timeout).
 	safego.Go(func() {
-		<-ctx.Done()
-		if cmd.Process != nil {
-			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) // best-effort
+		select {
+		case <-done:
+			// The command exited on its own (the cancel() above also fires
+			// ctx). Leave the group alone, as the foreground path does: its
+			// children keep running, and an empty group's pgid may be reused.
+			return
+		case <-ctx.Done():
+			// Re-check done: mp.Wait() may have returned concurrently.
+			select {
+			case <-done:
+				return
+			default:
+			}
+			if cmd.Process != nil {
+				_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) // best-effort
+			}
 		}
 	})
 

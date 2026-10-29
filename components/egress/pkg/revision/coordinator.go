@@ -1,4 +1,4 @@
-// Copyright 2026 Alibaba Group Holding Ltd.
+// Copyright 2026 The OpenSandbox Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -15,10 +15,11 @@
 // Package revision provides the in-memory Go coordinator for OSEP-0023.
 // It has no live Vault, TLS, or IPC wiring. Callers must build and validate the
 // complete policy/Vault snapshot under their mutation barrier, gate reads on
-// Confirmed, and finalize their public store under that same barrier. Transport
-// authentication, receiver/session fencing, restart recovery, and remote teardown
-// remain adapter responsibilities. New is for a fresh generation pair, not a
-// replacement for recovery of an existing receiver.
+// Confirmed, and finalize their public store under that same barrier. The
+// unused revisionruntime ProcessSession adapter owns transport authentication, a fresh
+// receiver directory/generation, readiness, and local cleanup. Live launch,
+// restart recovery, and remote connection teardown remain integration work.
+// New is for a fresh generation pair, not recovery of an existing receiver.
 package revision
 
 import (
@@ -42,12 +43,12 @@ var (
 // Identity matches the Python receiver's generation/epoch/digest identity.
 // It contains no snapshot payload. Wire encoding belongs to the IPC adapter.
 type Identity struct {
-	ControlGeneration string
-	SubjectGeneration string
-	DecisionEpoch     int64
-	VaultRevision     int64
-	PolicyEpoch       int64
-	Digest            string
+	ControlGeneration string `json:"controlGeneration"`
+	SubjectGeneration string `json:"subjectGeneration"`
+	DecisionEpoch     int64  `json:"decisionEpoch"`
+	VaultRevision     int64  `json:"vaultRevision"`
+	PolicyEpoch       int64  `json:"policyEpoch"`
+	Digest            string `json:"digest"`
 }
 
 // Transport binds one authenticated receiver/session to this coordinator.
@@ -128,7 +129,12 @@ func (c *Coordinator) Confirmed() (*Identity, error) {
 // snapshot bytes. Public Vault revisions may restart after a delete/recreate.
 // A failed prepare is retired by an acknowledged abort. Once commit is sent,
 // only exact commit acknowledgement/readback can publish the candidate; abort
-// must never be used to guess that a commit was rolled back.
+// must never be used to guess that a commit was rolled back. Only when this call
+// has allocated a candidate and its prepare/abort or commit outcome is
+// ErrIndeterminate does Apply return that non-zero candidate identity; an early
+// ErrIndeterminate, such as an already-pending operation, returns a zero identity.
+// The returned identity identifies an attempt, not proof of activation; callers
+// must compare it exactly with a later Reconcile result before publishing.
 func (c *Coordinator) Apply(ctx context.Context, vaultRevision, policyEpoch int64, payload []byte) (Identity, error) {
 	c.mu.Lock()
 	if err := c.available(); err != nil {
@@ -160,7 +166,10 @@ func (c *Coordinator) Apply(ctx context.Context, vaultRevision, policyEpoch int6
 		if err == nil && ack == r {
 			return Identity{}, c.finish(false, ErrPrepareRejected)
 		}
-		return Identity{}, c.finish(false, ErrIndeterminate)
+		if finishErr := c.finish(false, ErrIndeterminate); finishErr != ErrIndeterminate {
+			return Identity{}, finishErr
+		}
+		return r, ErrIndeterminate
 	}
 	c.mu.Lock()
 	if c.closed {
@@ -171,7 +180,10 @@ func (c *Coordinator) Apply(ctx context.Context, vaultRevision, policyEpoch int6
 	c.mu.Unlock()
 	ack, err = c.transport.Commit(ctx, r)
 	if err != nil || ack != r {
-		return Identity{}, c.finish(false, ErrIndeterminate)
+		if finishErr := c.finish(false, ErrIndeterminate); finishErr != ErrIndeterminate {
+			return Identity{}, finishErr
+		}
+		return r, ErrIndeterminate
 	}
 	if err := c.finish(true, nil); err != nil {
 		return Identity{}, err

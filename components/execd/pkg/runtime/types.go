@@ -1,4 +1,4 @@
-// Copyright 2025 Alibaba Group Holding Ltd.
+// Copyright 2025 The OpenSandbox Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -85,19 +85,14 @@ type CodeContext struct {
 	Language Language `json:"language"`
 }
 
-// bashSessionConfig holds bash session configuration.
 type bashSessionConfig struct {
 	// StartupSource is a list of scripts sourced on startup.
-	StartupSource []string
-	// Session is the session identifier.
-	Session string
-	// StartupTimeout is the startup timeout.
+	StartupSource  []string
+	Session        string
 	StartupTimeout time.Duration
-	// Cwd is the working directory.
-	Cwd string
+	Cwd            string
 }
 
-// bashSession represents a bash session.
 type bashSession struct {
 	config  *bashSessionConfig
 	mu      sync.Mutex

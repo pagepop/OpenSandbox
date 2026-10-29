@@ -3,6 +3,13 @@ name: Execd Tests
 on:
   pull_request:
     branches: [ main ]
+  workflow_dispatch:
+    inputs:
+      linux_only:
+        description: 'Run Linux verification without Windows or self-hosted runners'
+        required: false
+        type: boolean
+        default: true
 
 permissions:
   contents: read
@@ -30,7 +37,14 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v6
         with:
-          go-version: '1.25.9'
+          go-version: '1.26.10'
+          cache-dependency-path: components/execd/go.sum
+
+      - name: Test compromised CA rejection and valid TLS control
+        working-directory: components/internal
+        env:
+          GOTOOLCHAIN: local
+        run: go test -run TestEmSign .
 
       - name: Check gofmt
         working-directory: components/execd
@@ -55,6 +69,24 @@ jobs:
         working-directory: components/execd
         run: |
           go test -v -coverpkg=./... -coverprofile=coverage.out -covermode=atomic ./pkg/...
+
+      - name: Verify filesystem identity permissions as root
+        working-directory: components/execd
+        run: |
+          go test -c -o /tmp/execd-filesystem-identity.test ./pkg/web
+          sudo /tmp/execd-filesystem-identity.test -test.run "^TestFilesystemIdentity" -test.v -test.timeout 90s
+          go test -c -o /tmp/execd-filesystem-runtime.test ./pkg/runtime
+          sudo /tmp/execd-filesystem-runtime.test -test.run "^TestFilesystem" -test.v -test.timeout 90s
+
+      - name: Verify OOM watcher smoke as root
+        working-directory: components/execd
+        run: |
+          # End-to-end: a helper process joins a memory-limited cgroup, the
+          # kernel OOM killer terminates it, and the execd OOM watcher must
+          # emit its detection log line. Skips itself when cgroup v2 or root
+          # is unavailable.
+          go test -c -o /tmp/execd-oom-smoke.test ./pkg/telemetry
+          sudo /tmp/execd-oom-smoke.test -test.run "^TestOOMSmoke$" -test.v -test.timeout 120s
 
       - name: Run execd-ebpf variant tests
         working-directory: components/execd
@@ -99,7 +131,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, self-hosted]
+        os: ${{ github.event_name == 'workflow_dispatch' && inputs.linux_only && fromJSON('["ubuntu-latest"]') || fromJSON('["ubuntu-latest", "windows-latest", "self-hosted"]') }}
     runs-on: ${{ matrix.os }}
     defaults:
       run:
@@ -111,7 +143,9 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v6
         with:
-          go-version: '1.25.9'
+          go-version: '1.26.10'
+          cache: ${{ matrix.os != 'self-hosted' }}
+          cache-dependency-path: components/execd/go.sum
 
       - name: Set up Python
         uses: actions/setup-python@v6
@@ -136,6 +170,12 @@ jobs:
 
           sleep 5
           python3 tests/smoke_api.py
+      - name: Runtime init smoke test
+        if: matrix.os == 'ubuntu-latest'
+        timeout-minutes: 5
+        working-directory: components/execd
+        run: |
+          bash tests/runtime_init.sh
       - name: SIGTERM forward test
         if: matrix.os == 'ubuntu-latest'
         working-directory: components/execd
@@ -153,6 +193,12 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         working-directory: components/execd
         run: bash tests/mitm_ca_nss.sh
+
+      - name: MITM CA JDK bootstrap test
+        if: matrix.os == 'ubuntu-latest'
+        timeout-minutes: 5
+        working-directory: components/execd
+        run: python3 tests/test_mitm_ca_jdk.py
 
       - name: Smoke test bwrap (Docker image build + extraction)
         if: matrix.os == 'ubuntu-latest'
@@ -201,7 +247,8 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v6
         with:
-          go-version: '1.25.9'
+          go-version: '1.26.10'
+          cache-dependency-path: components/execd/go.sum
 
       - name: Build latest bubblewrap (v0.11.2)
         run: |
@@ -212,6 +259,13 @@ jobs:
           ninja -C builddir
           sudo cp builddir/bwrap /usr/local/bin/bwrap
           bwrap --version
+
+      - name: Multi-overlay mounts smoke test
+        working-directory: components/execd
+        shell: bash
+        run: |
+          chmod +x tests/smoke_overlays.sh
+          SMOKE_OVERLAYS_REQUIRE_ROOT=1 bash tests/smoke_overlays.sh
 
       - name: Build and install native session workload gate
         working-directory: components/execd
@@ -288,7 +342,7 @@ jobs:
             ./pkg/runtime
 
   required:
-    name: Execd CI
+    name: ${{ github.event_name == 'workflow_dispatch' && inputs.linux_only && 'Execd Linux Verification' || 'Execd CI' }}
     if: always()
     needs: [changes, test, smoke, bwrap-smoke]
     runs-on: ubuntu-latest

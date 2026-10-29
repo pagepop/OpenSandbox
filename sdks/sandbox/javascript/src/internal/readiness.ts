@@ -1,4 +1,4 @@
-// Copyright 2026 Alibaba Group Holding Ltd.
+// Copyright 2026 The OpenSandbox Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -12,7 +12,22 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-import { SandboxApiException, SandboxReadyTimeoutException } from "../core/exceptions.js";
+import {
+  InvalidArgumentException,
+  SandboxApiException,
+  SandboxReadyTimeoutException,
+} from "../core/exceptions.js";
+import { subscribeAbort, type AbortSubscription } from "./abort.js";
+
+export function validatePollingInterval(interval: number): void {
+  // setTimeout() runs a negative delay immediately, which would hammer the
+  // endpoint until the deadline. The Python SDK rejects the same values.
+  if (interval < 0) {
+    throw new InvalidArgumentException({
+      message: `Ready polling interval must not be negative, got: ${interval}`,
+    });
+  }
+}
 
 export class ReadinessBudget {
   private readonly deadline: number;
@@ -53,7 +68,7 @@ export class ReadinessBudget {
     const remaining = this.remaining();
     const controller = new AbortController();
     const onAbort = () => controller.abort(this.caller?.reason);
-    this.caller?.addEventListener("abort", onAbort, { once: true });
+    const unsubscribeCaller = subscribeAbort(this.caller, onAbort);
     const timer = setTimeout(() => {
       this.timedOut = true;
       controller.abort(this.timeout());
@@ -72,7 +87,7 @@ export class ReadinessBudget {
       throw error;
     } finally {
       clearTimeout(timer);
-      this.caller?.removeEventListener("abort", onAbort);
+      unsubscribeCaller();
       if (rejectAbort) controller.signal.removeEventListener("abort", rejectAbort);
     }
   }
@@ -80,9 +95,10 @@ export class ReadinessBudget {
   async pause(interval: number): Promise<void> {
     const duration = Math.min(interval, this.remaining());
     await new Promise<void>((resolve, reject) => {
-      const timer = setTimeout(() => { this.caller?.removeEventListener("abort", abort); resolve(); }, duration);
+      let unsubscribeCaller: AbortSubscription = () => undefined;
+      const timer = setTimeout(() => { unsubscribeCaller(); resolve(); }, duration);
       const abort = () => { clearTimeout(timer); reject(this.caller?.reason); };
-      this.caller?.addEventListener("abort", abort, { once: true });
+      unsubscribeCaller = subscribeAbort(this.caller, abort);
     });
     this.remaining();
   }

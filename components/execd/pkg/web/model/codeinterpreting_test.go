@@ -1,4 +1,4 @@
-// Copyright 2025 Alibaba Group Holding Ltd.
+// Copyright 2025 The OpenSandbox Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -128,15 +128,12 @@ func unsetModelEnvForTest(t *testing.T, key string) {
 func ptr32(v uint32) *uint32 { return &v }
 
 func TestRunCommandRequestValidateUidGid(t *testing.T) {
-	// uid-only: valid
 	req := RunCommandRequest{Command: "id", Uid: ptr32(1000)}
 	require.NoError(t, req.Validate(), "expected success with uid only")
 
-	// uid + gid: valid
 	req = RunCommandRequest{Command: "id", Uid: ptr32(1000), Gid: ptr32(1000)}
 	require.NoError(t, req.Validate(), "expected success with uid and gid")
 
-	// gid-only: must be rejected
 	req = RunCommandRequest{Command: "id", Gid: ptr32(1000)}
 	require.Error(t, req.Validate(), "expected validation error when gid is set without uid")
 }
@@ -154,6 +151,36 @@ func TestServerStreamEventToJSON(t *testing.T) {
 	require.Equal(t, event.Type, decoded.Type)
 	require.Equal(t, event.Text, decoded.Text)
 	require.Equal(t, event.ExecutionCount, decoded.ExecutionCount)
+}
+
+func TestServerStreamEventErrorExitCodeJSON(t *testing.T) {
+	exitCode := 3
+	exited := ServerStreamEvent{
+		Type: StreamEventTypeError,
+		Error: &execute.ErrorOutput{
+			EName:     "CommandExecError",
+			EValue:    "3",
+			Traceback: []string{"exit status 3"},
+			ExitCode:  &exitCode,
+		},
+	}
+	require.Contains(t, string(exited.ToJSON()), `"exit_code":3`)
+
+	var decoded ServerStreamEvent
+	require.NoError(t, json.Unmarshal(exited.ToJSON(), &decoded))
+	require.NotNil(t, decoded.Error)
+	require.NotNil(t, decoded.Error.ExitCode)
+	require.Equal(t, 3, *decoded.Error.ExitCode)
+
+	startFailure := ServerStreamEvent{
+		Type: StreamEventTypeError,
+		Error: &execute.ErrorOutput{
+			EName:     "CommandExecError",
+			EValue:    "fork/exec /usr/bin/bash: argument list too long",
+			Traceback: []string{"fork/exec /usr/bin/bash: argument list too long"},
+		},
+	}
+	require.NotContains(t, string(startFailure.ToJSON()), "exit_code")
 }
 
 func TestServerStreamEventSummary(t *testing.T) {
@@ -224,8 +251,10 @@ func TestCommandAndSessionCwdUseTheirOwnEnvironment(t *testing.T) {
 		req.Envs = map[string]string{"ARGV_DIR": missing}
 		require.Error(t, req.Validate())
 	}
+	// Session cwd validation is deferred to the runtime layer, which resolves
+	// against the target session's environment (EXECD_ENVS file values and
+	// variables exported in earlier runs), not the daemon environment. See
+	// Controller.ValidateBashSessionCwd.
 	session := RunInSessionRequest{Command: "pwd", Cwd: "$ARGV_DIR"}
-	require.Error(t, session.Validate())
-	t.Setenv("ARGV_DIR", dir)
 	require.NoError(t, session.Validate())
 }

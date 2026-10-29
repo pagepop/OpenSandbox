@@ -1,4 +1,4 @@
-# Copyright 2026 Alibaba Group Holding Ltd.
+# Copyright 2026 The OpenSandbox Authors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -20,6 +20,7 @@ import pytest
 from opensandbox_server.services.k8s.workload_mapper import (
     _build_sandbox_from_workload,
     _extract_platform_from_workload,
+    allocated_pod_names,
 )
 
 
@@ -226,7 +227,6 @@ class TestExtractPlatformFromWorkload:
             },
             "status": {"replicas": 1, "ready": 1, "allocated": 1},
         }
-        # Should return None (no platform info), not raise.
         assert _extract_platform_from_workload(workload) is None
 
     def test_pool_mode_workload_without_template_key_returns_none(self):
@@ -288,3 +288,54 @@ class TestExtractPlatformFromWorkload:
     def test_empty_workload_returns_none(self):
         workload = {}
         assert _extract_platform_from_workload(workload) is None
+
+
+def _allocation_workload(**annotations: str) -> dict:
+    return {"metadata": {"annotations": annotations}}
+
+
+@pytest.mark.parametrize(
+    ("annotations", "expected"),
+    [
+        ({}, []),
+        ({"sandbox.opensandbox.io/alloc-status": '{"pods":["a","b"]}'}, ["a", "b"]),
+        (
+            {
+                "sandbox.opensandbox.io/alloc-status": '{"pods":["a","b"]}',
+                "sandbox.opensandbox.io/alloc-release": '{"pods":["a"]}',
+            },
+            ["b"],
+        ),
+        (
+            {
+                "sandbox.opensandbox.io/alloc-status": '{"pods":["a","b","c"]}',
+                "sandbox.opensandbox.io/alloc-release": '{"pods":["a"]}',
+                "sandbox.opensandbox.io/alloc-released": '{"pods":["b"]}',
+            },
+            ["c"],
+        ),
+        (
+            {
+                "sandbox.opensandbox.io/alloc-status": '{"pods":["a"]}',
+                "sandbox.opensandbox.io/alloc-release": "",
+            },
+            ["a"],
+        ),
+        (
+            {
+                "sandbox.opensandbox.io/alloc-status": '{"pods":["a"]}',
+                "sandbox.opensandbox.io/alloc-release": "not json",
+            },
+            [],
+        ),
+        ({"sandbox.opensandbox.io/alloc-status": "not json"}, []),
+    ],
+    ids=["none", "allocated", "released-left-out", "release-and-released", "empty-release", "bad-release", "bad-status"],
+)
+def test_allocated_pod_names(annotations: dict, expected: list[str]) -> None:
+    assert allocated_pod_names(_allocation_workload(**annotations)) == expected
+
+
+def test_allocated_pod_names_ignores_non_dict_workloads() -> None:
+    assert allocated_pod_names(None) == []
+    assert allocated_pod_names(object()) == []

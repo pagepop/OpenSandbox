@@ -1,4 +1,4 @@
-# Copyright 2025 Alibaba Group Holding Ltd.
+# Copyright 2025 The OpenSandbox Authors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -52,7 +52,7 @@ def create_sandbox_service(
     active_config = config or get_config()
     selected_type = (service_type or active_config.runtime.type).lower()
 
-    logger.info("Creating sandbox service with type: %s", selected_type)
+    logger.info(f"Creating sandbox service with type: {selected_type}")
 
     # Service implementation registry
     # Add new implementations here as they are created

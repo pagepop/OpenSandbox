@@ -1,4 +1,4 @@
-# Copyright 2026 Alibaba Group Holding Ltd.
+# Copyright 2026 The OpenSandbox Authors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -23,12 +23,14 @@ from __future__ import annotations
 
 import re
 import time
+from typing import Any
 
 from docker.errors import DockerException
 from fastapi import HTTPException, status
 
 from opensandbox_server.services.constants import SandboxErrorCodes
 from opensandbox_server.services.diagnostics import (
+    DiagnosticContext,
     DiagnosticResult,
     limit_diagnostic_lines,
     unsupported_scope_error,
@@ -48,7 +50,7 @@ def _parse_since_to_timestamp(since: str) -> int:
     """
     m = re.fullmatch(r"(\d+)\s*([smhd])", since.strip().lower())
     if not m:
-        seconds = 600  # default 10m
+        seconds = 600
     else:
         value, unit = int(m.group(1)), m.group(2)
         multipliers = {"s": 1, "m": 60, "h": 3600, "d": 86400}
@@ -56,8 +58,40 @@ def _parse_since_to_timestamp(since: str) -> int:
     return int(time.time()) - seconds
 
 
+def _container_lifecycle_state(container: Any) -> tuple[str, str, str]:
+    """Classify container inspect data without looking up its image."""
+    state = container.attrs.get("State", {})
+    status_value = (state.get("Status") or container.status or "").lower()
+    if state.get("Running", False) and not state.get("Paused", False):
+        return "Running", "CONTAINER_RUNNING", "Sandbox container is running."
+    if state.get("Paused", False):
+        return "Paused", "CONTAINER_PAUSED", "Sandbox container is paused."
+    if state.get("Restarting", False):
+        return "Running", "CONTAINER_RESTARTING", "Sandbox container is restarting."
+    if status_value in {"created", "starting"}:
+        return "Pending", "CONTAINER_STARTING", "Sandbox container is starting."
+    if status_value in {"exited", "dead"}:
+        exit_code = state.get("ExitCode")
+        if exit_code == 0:
+            return "Terminated", "CONTAINER_EXITED", "Sandbox container exited successfully."
+        return "Failed", "CONTAINER_EXITED_ERROR", f"Sandbox container exited with code {exit_code}."
+    return "Unknown", "CONTAINER_STATE_UNKNOWN", f"Sandbox container is in state '{status_value or 'unknown'}'."
+
+
 class DockerDiagnosticsMixin:
     """Mixin that implements diagnostics methods for the Docker backend."""
+
+    def get_sandbox_diagnostic_context(self, sandbox_id: str) -> DiagnosticContext:
+        container = self._get_container_by_sandbox_id(sandbox_id)
+        # Container lookup already provides inspect data. Do not construct a full
+        # Sandbox here: that also inspects the image, which may no longer exist.
+        state, _, _ = _container_lifecycle_state(container)
+        return DiagnosticContext(
+            sandbox_id=sandbox_id,
+            state=state,
+            backend_type="docker",
+            backend_identifiers={"containerId": container.id, "containerName": container.name},
+        )
 
     def get_sandbox_log_diagnostics(
         self,
@@ -176,7 +210,6 @@ class DockerDiagnosticsMixin:
         if state.get("Error"):
             lines.append(f"Error:          {state['Error']}")
 
-        # Resource limits
         lines.append("")
         lines.append("Resources:")
         nano_cpus = host_config.get("NanoCpus", 0)
@@ -189,7 +222,6 @@ class DockerDiagnosticsMixin:
         if pids_limit:
             lines.append(f"  PIDs Limit:   {pids_limit}")
 
-        # Network
         lines.append("")
         lines.append("Network:")
         networks = network_settings.get("Networks", {})
@@ -197,7 +229,6 @@ class DockerDiagnosticsMixin:
             ip = (net_info or {}).get("IPAddress", "N/A")
             lines.append(f"  {net_name}: {ip}")
 
-        # Ports
         ports = network_settings.get("Ports", {})
         if ports:
             lines.append("")
@@ -209,7 +240,6 @@ class DockerDiagnosticsMixin:
                 else:
                     lines.append(f"  {port_key} (not bound)")
 
-        # Labels
         labels = config_section.get("Labels", {})
         if labels:
             lines.append("")
@@ -217,7 +247,6 @@ class DockerDiagnosticsMixin:
             for k, v in sorted(labels.items()):
                 lines.append(f"  {k}={v}")
 
-        # Environment (filter sensitive)
         env_list = config_section.get("Env", [])
         if env_list:
             lines.append("")
@@ -260,7 +289,6 @@ class DockerDiagnosticsMixin:
         if state.get("Error"):
             lines.append(f"Event:      Error - {state['Error']}")
 
-        # Health check status if available
         health = state.get("Health", {})
         if health:
             lines.append(f"Health:     {health.get('Status', 'N/A')}")

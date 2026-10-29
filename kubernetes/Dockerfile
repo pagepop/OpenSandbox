@@ -1,4 +1,4 @@
-# Copyright 2025 Alibaba Group Holding Ltd.
+# Copyright 2025 The OpenSandbox Authors
 # 
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -13,7 +13,8 @@
 # limitations under the License.
 
 # Build the manager binary
-FROM golang:1.25.12-alpine AS builder
+FROM golang:1.26.10-alpine@sha256:a2012b4a1d1f9f7e9f44e0d39b805a901e856b1dd80b4e6ee4338db547050308 AS builder
+ENV GOTOOLCHAIN=local
 ARG TARGETOS
 ARG TARGETARCH
 ARG GOFLAGS=
@@ -29,7 +30,8 @@ ARG CGO_CXXFLAGS=
 ARG CGO_LDFLAGS=
 
 WORKDIR /workspace
-RUN apk add --no-cache git
+RUN apk add --no-cache git 'ca-certificates>=20261020-r0' \
+    && update-ca-certificates
 # Copy the Go Modules manifests
 COPY go.mod go.mod
 COPY go.sum go.sum
@@ -62,7 +64,9 @@ RUN if [ -n "${CC}" ]; then export CC; fi; \
 
 # Use golang image as base to ensure nsenter (util-linux) is available
 # distroless does not contain shell or nsenter
-FROM golang:1.25.12-alpine
+FROM golang:1.26.10-alpine@sha256:a2012b4a1d1f9f7e9f44e0d39b805a901e856b1dd80b4e6ee4338db547050308
+RUN apk add --no-cache 'ca-certificates>=20261020-r0' \
+    && update-ca-certificates
 ARG USERID=65532
 WORKDIR /workspace
 COPY --from=builder /workspace/server .

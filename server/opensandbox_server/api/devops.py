@@ -1,4 +1,4 @@
-# Copyright 2026 Alibaba Group Holding Ltd.
+# Copyright 2026 The OpenSandbox Authors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -27,10 +27,21 @@ from fastapi import APIRouter, HTTPException, Query, status
 from fastapi.responses import JSONResponse, PlainTextResponse
 
 from opensandbox_server.api.lifecycle import sandbox_service
-from opensandbox_server.services.diagnostics import DiagnosticResult
+from opensandbox_server.services.diagnostics import DiagnosticContext, DiagnosticResult
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["DevOps"])
+
+
+@router.get(
+    "/sandboxes/{sandbox_id}/diagnostics/context",
+    response_model=DiagnosticContext,
+    response_model_exclude_none=True,
+    responses={404: {"description": "Sandbox not found"}, 501: {"description": "Not implemented"}},
+)
+def get_sandbox_diagnostic_context(sandbox_id: str) -> DiagnosticContext:
+    """Identify the runtime backend and its diagnostic identifiers."""
+    return sandbox_service.get_sandbox_diagnostic_context(sandbox_id)
 
 
 def _diagnostic_inline_response(
@@ -192,10 +203,9 @@ def get_sandbox_diagnostics_summary(
     except HTTPException:
         raise
     except Exception:
-        logger.exception("Failed to collect sandbox inspect diagnostics for %s", sandbox_id)
+        logger.exception(f"Failed to collect sandbox inspect diagnostics for {sandbox_id}")
         sections.append("[error] Failed to collect inspect diagnostics.")
 
-    # Events
     sections.append("")
     sections.append("-" * 40)
     sections.append("EVENTS")
@@ -205,20 +215,19 @@ def get_sandbox_diagnostics_summary(
     except HTTPException:
         raise
     except Exception:
-        logger.exception("Failed to collect sandbox event diagnostics for %s", sandbox_id)
+        logger.exception(f"Failed to collect sandbox event diagnostics for {sandbox_id}")
         sections.append("[error] Failed to collect event diagnostics.")
 
-    # Logs
     sections.append("")
     sections.append("-" * 40)
-    sections.append("LOGS (last {} lines)".format(tail))
+    sections.append(f"LOGS (last {tail} lines)")
     sections.append("-" * 40)
     try:
         sections.append(sandbox_service.get_sandbox_logs(sandbox_id, tail=tail))
     except HTTPException:
         raise
     except Exception:
-        logger.exception("Failed to collect sandbox log diagnostics for %s", sandbox_id)
+        logger.exception(f"Failed to collect sandbox log diagnostics for {sandbox_id}")
         sections.append("[error] Failed to collect log diagnostics.")
 
     return PlainTextResponse(content="\n".join(sections) + "\n")

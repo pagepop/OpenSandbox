@@ -1,4 +1,4 @@
-// Copyright 2025 Alibaba Group Holding Ltd.
+// Copyright 2025 The OpenSandbox Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -26,7 +26,6 @@ import (
 	"github.com/alibaba/opensandbox/execd/pkg/runtime"
 )
 
-// RunCodeRequest represents a code execution request.
 type RunCodeRequest struct {
 	Context CodeContext `json:"context,omitempty"`
 	Code    string      `json:"code" validate:"required"`
@@ -37,7 +36,6 @@ func (r *RunCodeRequest) Validate() error {
 	return validate.Struct(r)
 }
 
-// CodeContext tracks session metadata.
 type CodeContext struct {
 	ID                 string `json:"id,omitempty"`
 	CodeContextRequest `json:",inline"`
@@ -136,13 +134,13 @@ type ServerStreamEvent struct {
 	Type           ServerStreamEventType `json:"type,omitempty"`
 	Text           string                `json:"text,omitempty"`
 	ExecutionCount int                   `json:"execution_count,omitempty"`
+	ExitCode       *int                  `json:"exit_code,omitempty"`
 	ExecutionTime  int64                 `json:"execution_time,omitempty"`
 	Timestamp      int64                 `json:"timestamp,omitempty"`
 	Results        map[string]any        `json:"results,omitempty"`
 	Error          *execute.ErrorOutput  `json:"error,omitempty"`
 }
 
-// ToJSON serializes the event for streaming.
 func (s ServerStreamEvent) ToJSON() []byte {
 	bytes, _ := json.Marshal(s)
 	return bytes

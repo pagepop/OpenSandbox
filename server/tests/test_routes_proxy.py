@@ -1,4 +1,4 @@
-# Copyright 2026 Alibaba Group Holding Ltd.
+# Copyright 2026 The OpenSandbox Authors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -20,6 +20,7 @@ from typing import Any, cast
 
 import httpx
 import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from starlette.requests import ClientDisconnect
 from starlette.types import Message
@@ -33,13 +34,15 @@ from opensandbox_server.api.schema import Endpoint
 from opensandbox_server.middleware.auth import SANDBOX_API_KEY_HEADER
 from opensandbox_server.services.constants import OPEN_SANDBOX_EGRESS_AUTH_HEADER, OPEN_SANDBOX_INGRESS_HEADER
 from opensandbox_server.services.constants import OPEN_SANDBOX_SECURE_ACCESS_HEADER
+from opensandbox_server.tenants.context import get_current_tenant
+from opensandbox_server.tenants.models import TenantEntry
 
 
 class _FakeStreamingResponse:
     def __init__(
         self,
         status_code: int = 200,
-        headers: dict | None = None,
+        headers: dict | list[tuple[str, str]] | None = None,
         chunks: list[bytes] | None = None,
         raw_chunks: list[bytes] | None = None,
     ):
@@ -544,8 +547,8 @@ def test_proxy_forwards_filtered_headers_and_query(
 
     assert fake_client.built is not None
     assert fake_client.built["method"] == "POST"
-    assert fake_client.built["url"] == "http://10.57.1.91:40109/api/run"
-    assert fake_client.built["params"] == "q=search"
+    assert fake_client.built["url"] == "http://10.57.1.91:40109/api/run?q=search"
+    assert fake_client.built["params"] is None
     forwarded_headers = fake_client.built["headers"]
     lowered_headers = {k.lower(): v for k, v in forwarded_headers.items()}
     assert "host" not in lowered_headers
@@ -778,8 +781,8 @@ def test_proxy_root_path_forwards_endpoint_headers_and_query(
     assert response.status_code == 200
     assert response.content == b"root-ok"
     assert fake_client.built is not None
-    assert fake_client.built["url"] == "http://10.57.1.91:40109/base"
-    assert fake_client.built["params"] == "q=search"
+    assert fake_client.built["url"] == "http://10.57.1.91:40109/base?q=search"
+    assert fake_client.built["params"] is None
     lowered_headers = {
         key.lower(): value for key, value in fake_client.built["headers"].items()
     }
@@ -792,7 +795,6 @@ def test_proxy_rejects_missing_secure_access_header(
     auth_headers: dict,
     monkeypatch,
 ) -> None:
-    """Regression test: requests without the required secure-access token are rejected."""
     class StubService:
         @staticmethod
         def get_endpoint(sandbox_id: str, port: int, resolve_internal: bool = False, use_proxy_host: bool = False) -> Endpoint:
@@ -828,7 +830,6 @@ def test_proxy_rejects_mismatched_secure_access_header(
     auth_headers: dict,
     monkeypatch,
 ) -> None:
-    """Regression test: requests with a wrong secure-access token are rejected."""
     class StubService:
         @staticmethod
         def get_endpoint(sandbox_id: str, port: int, resolve_internal: bool = False, use_proxy_host: bool = False) -> Endpoint:
@@ -911,11 +912,10 @@ def test_proxy_forwards_get_request_with_query_params(
     auth_headers: dict,
     monkeypatch,
 ) -> None:
-    """Test that GET requests with query parameters are forwarded correctly.
-
+    """
     This test verifies the fix for issue #484 where GET requests with query
     parameters were failing with 400 MISSING_QUERY when using use_server_proxy.
-    The query string should be passed via httpx params, not embedded in URL.
+    The query string must reach the backend URL.
     """
     class StubService:
         @staticmethod
@@ -944,9 +944,109 @@ def test_proxy_forwards_get_request_with_query_params(
     assert response.status_code == 200
     assert fake_client.built is not None
     assert fake_client.built["method"] == "GET"
-    assert fake_client.built["url"] == "http://10.57.1.91:40109/files/search"
-    assert fake_client.built["params"] == "path=%2Fworkspace"
+    assert fake_client.built["url"] == "http://10.57.1.91:40109/files/search?path=%2Fworkspace"
+    assert fake_client.built["params"] is None
     assert fake_client.built["content"] is None
+
+
+def _record_backend_raw_paths(client: TestClient, monkeypatch) -> list[bytes]:
+    class StubService:
+        @staticmethod
+        def get_endpoint(sandbox_id: str, port: int, resolve_internal: bool = False, use_proxy_host: bool = False) -> Endpoint:
+            return Endpoint(endpoint="10.57.1.91:40109")
+
+    monkeypatch.setattr(lifecycle, "sandbox_service", StubService())
+    seen: list[bytes] = []
+
+    class _Body(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            yield b"ok"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.url.raw_path)
+        return httpx.Response(200, stream=_Body())
+
+    _set_http_client(client, cast(Any, httpx.AsyncClient(transport=httpx.MockTransport(handler))))
+    return seen
+
+
+def test_proxy_forwards_raw_query_string_unchanged(
+    client: TestClient,
+    auth_headers: dict,
+    monkeypatch,
+) -> None:
+    seen = _record_backend_raw_paths(client, monkeypatch)
+
+    # Repeated keys out of order, a valueless flag, a non-UTF-8 escape, a
+    # literal ';' and a %20 space must all reach the backend byte for byte.
+    raw_query = "b=2&a=1&b=3&uploads&sig=%E9%FF&s=1;2&q=hello%20world"
+    response = client.get(
+        f"/v1/sandboxes/sbx-123/proxy/44772/files/search?{raw_query}",
+        headers=auth_headers,
+    )
+
+    assert response.status_code == 200
+    assert seen == [f"/files/search?{raw_query}".encode("ascii")]
+
+
+@pytest.mark.parametrize("prefix", ["/v1", ""])
+@pytest.mark.parametrize(
+    "suffix",
+    [
+        "api/contents/plain.txt?type=file",
+        "api/contents/a%2Fb",
+        "api/contents/a%3Fb.txt",
+        "api/contents/a%23b.txt?type=file",
+        "api/contents/100%25.txt",
+        "api/contents/caf%E9.txt",
+        "api/contents/a/%2E%2E/b",
+    ],
+)
+def test_proxy_forwards_encoded_path_unchanged(
+    client: TestClient,
+    auth_headers: dict,
+    monkeypatch,
+    prefix: str,
+    suffix: str,
+) -> None:
+    seen = _record_backend_raw_paths(client, monkeypatch)
+
+    response = client.get(f"{prefix}/sandboxes/sbx-123/proxy/8888/{suffix}", headers=auth_headers)
+
+    assert response.status_code == 200
+    assert seen == [f"/{suffix}".encode("ascii")]
+
+
+def test_proxy_reencodes_decoded_path_when_raw_suffix_does_not_match(
+    client: TestClient,
+    auth_headers: dict,
+    monkeypatch,
+) -> None:
+    seen = _record_backend_raw_paths(client, monkeypatch)
+
+    # The encoded '/' in the sandbox id shifts the decoded match to port 8888,
+    # so the raw tail after the same number of '/' is not the matched suffix.
+    response = client.get(
+        "/v1/sandboxes/sbx%2Fproxy%2F8888/proxy/9999/x%3Fy",
+        headers=auth_headers,
+    )
+
+    assert response.status_code == 200
+    assert seen == [b"/proxy/9999/x%3Fy"]
+
+
+@pytest.mark.parametrize(
+    ("path", "query", "expected"),
+    [
+        ("a#frag", "x=1", "http://10.57.1.91:40109/a"),
+        ("a", "x=1#frag", "http://10.57.1.91:40109/a?x=1"),
+        ("a%23b", "x=1", "http://10.57.1.91:40109/a%23b?x=1"),
+    ],
+)
+def test_build_proxy_target_url_drops_raw_fragment(path: str, query: str, expected: str) -> None:
+    endpoint = Endpoint(endpoint="10.57.1.91:40109")
+
+    assert proxy_api._build_proxy_target_url(endpoint, path, query) == expected
 
 
 def test_proxy_forwards_delete_request_with_body(
@@ -954,11 +1054,6 @@ def test_proxy_forwards_delete_request_with_body(
     auth_headers: dict,
     monkeypatch,
 ) -> None:
-    """Test that DELETE requests with body payload are forwarded correctly.
-
-    This verifies that DELETE requests with JSON/body payload are not
-    incorrectly stripped when proxying.
-    """
     class StubService:
         @staticmethod
         def get_endpoint(sandbox_id: str, port: int, resolve_internal: bool = False, use_proxy_host: bool = False) -> Endpoint:
@@ -1028,6 +1123,60 @@ def test_proxy_filters_response_hop_by_hop_headers(
     assert response.headers.get("x-hop-temp") is None
 
 
+@pytest.mark.parametrize("status_code", [200, 302, 400])
+def test_proxy_preserves_repeated_response_headers(
+    client: TestClient,
+    auth_headers: dict,
+    monkeypatch,
+    status_code: int,
+) -> None:
+    class StubService:
+        @staticmethod
+        def get_endpoint(*args, **kwargs) -> Endpoint:
+            return Endpoint(endpoint="10.57.1.91:40109")
+
+    monkeypatch.setattr(lifecycle, "sandbox_service", StubService())
+    cookies = [
+        "session=abc; Path=/; HttpOnly; Expires=Wed, 09 Jun 2027 10:18:14 GMT",
+        "theme=dark; Path=/; SameSite=Lax",
+    ]
+    fake_client = _FakeAsyncClient()
+    fake_client.response = _FakeStreamingResponse(
+        status_code=status_code,
+        headers=[
+            ("Set-Cookie", cookies[0]),
+            ("set-cookie", cookies[1]),
+            ("X-Backend", "first"),
+            ("x-backend", "second"),
+            ("Connection", "X-Hop-One"),
+            ("connection", "X-Hop-Two"),
+            ("X-Hop-One", "drop-first"),
+            ("x-hop-one", "drop-second"),
+            ("X-Hop-Two", "drop-third"),
+            ("Server", "backend-one"),
+            ("server", "backend-two"),
+            ("Location", "/login"),
+        ],
+        chunks=[b"proxy-ok"],
+    )
+    _set_http_client(client, fake_client)
+
+    response = client.get(
+        "/v1/sandboxes/sbx-123/proxy/44772/healthz",
+        headers=auth_headers,
+        follow_redirects=False,
+    )
+
+    assert response.status_code == status_code
+    assert response.content == b"proxy-ok"
+    assert response.headers.get_list("set-cookie") == cookies
+    assert response.headers.get_list("x-backend") == ["first", "second"]
+    assert response.headers["location"] == "/v1/sandboxes/sbx-123/proxy/44772/login"
+    for name in ("connection", "x-hop-one", "x-hop-two", "server"):
+        assert name not in response.headers
+    assert fake_client.response.aclose_called is True
+
+
 def test_proxy_streams_raw_body_for_content_encoded_response(
     client: TestClient,
     auth_headers: dict,
@@ -1076,7 +1225,7 @@ def test_proxy_closes_backend_response_when_downstream_rejects_headers() -> None
         response = proxy_api._ProxyStreamingResponse(
             cast(httpx.Response, backend_response),
             status_code=200,
-            headers={},
+            raw_headers=[],
         )
 
         async def receive() -> Message:
@@ -1110,7 +1259,7 @@ def test_proxy_closes_backend_response_when_stream_is_cancelled() -> None:
         response = proxy_api._ProxyStreamingResponse(
             cast(httpx.Response, backend_response),
             status_code=200,
-            headers={},
+            raw_headers=[],
         )
 
         async def send(message: Message) -> None:
@@ -1186,17 +1335,108 @@ def test_proxy_rejects_websocket_upgrade_for_post_and_mixed_case_header(
     assert response.json()["message"] == "Websocket upgrade is not supported yet"
 
 
+def _on_event_loop() -> bool:
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return False
+    return True
+
+
+def test_proxy_resolves_endpoint_off_the_event_loop(
+    client: TestClient,
+    auth_headers: dict,
+    monkeypatch,
+) -> None:
+    # get_endpoint does blocking Docker/Kubernetes I/O; running it on the event
+    # loop would stall every other request while it waits.
+    on_loop: list[bool] = []
+
+    class StubService:
+        @staticmethod
+        def get_endpoint(sandbox_id: str, port: int, resolve_internal: bool = False, use_proxy_host: bool = False) -> Endpoint:
+            on_loop.append(_on_event_loop())
+            raise HTTPException(status_code=404, detail={"code": "NOT_FOUND", "message": "gone"})
+
+    monkeypatch.setattr(lifecycle, "sandbox_service", StubService())
+
+    response = client.get("/v1/sandboxes/sbx-123/proxy/44772/healthz", headers=auth_headers)
+
+    assert response.status_code == 404
+    assert on_loop == [False]
+
+
+def test_proxy_websocket_resolves_endpoint_off_the_event_loop(
+    client: TestClient,
+    auth_headers: dict,
+    monkeypatch,
+) -> None:
+    on_loop: list[bool] = []
+
+    class StubService:
+        @staticmethod
+        def get_endpoint(sandbox_id: str, port: int, resolve_internal: bool = False, use_proxy_host: bool = False) -> Endpoint:
+            on_loop.append(_on_event_loop())
+            return Endpoint(endpoint="10.57.1.91:40109")
+
+    monkeypatch.setattr(lifecycle, "sandbox_service", StubService())
+    monkeypatch.setattr(proxy_api.websockets, "connect", _FakeWebSocketConnector(_FakeBackendWebSocket()))
+
+    with client.websocket_connect(
+        "/v1/sandboxes/sbx-123/proxy/44772/ws", headers=auth_headers
+    ) as websocket:
+        assert websocket.receive_text() == "backend-ready"
+
+    assert on_loop == [False]
+
+
+def test_proxy_websocket_endpoint_lookup_sees_the_tenant(
+    client: TestClient,
+    monkeypatch,
+) -> None:
+    # The lookup runs in a worker thread; it must still see the tenant that
+    # authentication set, or it would resolve in the wrong namespace.
+    tenant = TenantEntry(name="team-a", namespace="ns-a", api_keys=("key-a",))
+
+    class Provider:
+        @staticmethod
+        def lookup(api_key: str) -> TenantEntry | None:
+            return tenant if api_key == "key-a" else None
+
+    seen: list[TenantEntry | None] = []
+
+    class StubService:
+        @staticmethod
+        def get_endpoint(sandbox_id: str, port: int, resolve_internal: bool = False, use_proxy_host: bool = False) -> Endpoint:
+            seen.append(get_current_tenant())
+            return Endpoint(endpoint="10.57.1.91:40109")
+
+    monkeypatch.setattr(client.app.state, "tenant_provider", Provider(), raising=False)
+    monkeypatch.setattr(lifecycle, "sandbox_service", StubService())
+    monkeypatch.setattr(proxy_api.websockets, "connect", _FakeWebSocketConnector(_FakeBackendWebSocket()))
+
+    with client.websocket_connect(
+        "/v1/sandboxes/sbx-123/proxy/44772/ws", headers={SANDBOX_API_KEY_HEADER: "key-a"}
+    ) as websocket:
+        assert websocket.receive_text() == "backend-ready"
+
+    assert seen == [tenant]
+
+
+@pytest.mark.parametrize("configured_resolve_internal", [True, False])
 def test_proxy_websocket_relays_messages_and_forwards_safe_headers(
     client: TestClient,
     auth_headers: dict,
     monkeypatch,
+    configured_resolve_internal: bool,
 ) -> None:
     class StubService:
         @staticmethod
         def get_endpoint(sandbox_id: str, port: int, resolve_internal: bool = False, use_proxy_host: bool = False) -> Endpoint:
             assert sandbox_id == "sbx-123"
             assert port == 44772
-            assert resolve_internal is True
+            assert resolve_internal is configured_resolve_internal
+            assert use_proxy_host is (not configured_resolve_internal)
             return Endpoint(
                 endpoint="10.57.1.91:40109/proxy/44772",
                 headers={
@@ -1207,6 +1447,13 @@ def test_proxy_websocket_relays_messages_and_forwards_safe_headers(
             )
 
     monkeypatch.setattr(lifecycle, "sandbox_service", StubService())
+    monkeypatch.setattr(
+        proxy_api,
+        "get_config",
+        lambda: SimpleNamespace(
+            proxy=SimpleNamespace(resolve_internal=configured_resolve_internal)
+        ),
+    )
     backend = _FakeBackendWebSocket()
     connector = _FakeWebSocketConnector(backend)
     monkeypatch.setattr(proxy_api.websockets, "connect", connector)
@@ -1252,6 +1499,30 @@ def test_proxy_websocket_relays_messages_and_forwards_safe_headers(
     assert lowered_headers["x-trace"] == "trace-ws"
 
 
+@pytest.mark.parametrize("suffix", ["ws/a%2Fb?token=abc", "ws/a%23b?token=abc"])
+def test_proxy_websocket_forwards_encoded_path_unchanged(
+    client: TestClient,
+    auth_headers: dict,
+    monkeypatch,
+    suffix: str,
+) -> None:
+    class StubService:
+        @staticmethod
+        def get_endpoint(sandbox_id: str, port: int, resolve_internal: bool = False, use_proxy_host: bool = False) -> Endpoint:
+            return Endpoint(endpoint="10.57.1.91:40109")
+
+    monkeypatch.setattr(lifecycle, "sandbox_service", StubService())
+    connector = _FakeWebSocketConnector(_FakeBackendWebSocket())
+    monkeypatch.setattr(proxy_api.websockets, "connect", connector)
+
+    with client.websocket_connect(
+        f"/v1/sandboxes/sbx-123/proxy/8888/{suffix}", headers=auth_headers
+    ) as websocket:
+        assert websocket.receive_text() == "backend-ready"
+
+    assert connector.calls[0]["uri"] == f"ws://10.57.1.91:40109/{suffix}"
+
+
 @pytest.mark.parametrize(
     "connection_error",
     [httpx.ConnectError("connection refused"), httpx.ConnectTimeout("connection timed out")],
@@ -1265,7 +1536,7 @@ def test_proxy_maps_connect_failure_to_502(
     class StubService:
         @staticmethod
         def get_endpoint(sandbox_id: str, port: int, resolve_internal: bool = False, use_proxy_host: bool = False) -> Endpoint:
-            return Endpoint(endpoint="10.57.1.91:40109")
+            return Endpoint(endpoint="10.57.1.91:40109", headers={"X-Endpoint-Token": "endpoint-secret"})
 
     monkeypatch.setattr(lifecycle, "sandbox_service", StubService())
     fake_client = _FakeAsyncClient()
@@ -1280,7 +1551,48 @@ def test_proxy_maps_connect_failure_to_502(
     assert response.status_code == 502
     payload = response.json()
     assert payload["code"] == "BACKEND_CONNECTION_FAILED"
-    assert "Could not connect to the backend sandbox" in payload["message"]
+    assert "Could not connect to the backend sandbox 10.57.1.91:40109" in payload["message"]
+    assert "endpoint-secret" not in payload["message"]
+
+
+@pytest.mark.parametrize(
+    ("backend_error", "expected_status", "expected_code"),
+    [
+        (httpx.ReadTimeout("read timed out"), 504, "BACKEND_TIMEOUT"),
+        (httpx.WriteTimeout("write timed out"), 504, "BACKEND_TIMEOUT"),
+        (httpx.RemoteProtocolError("server disconnected"), 502, "BACKEND_RESPONSE_FAILED"),
+        (httpx.ReadError("connection reset"), 502, "BACKEND_RESPONSE_FAILED"),
+        (httpx.WriteError("broken pipe"), 502, "BACKEND_RESPONSE_FAILED"),
+    ],
+)
+def test_proxy_maps_backend_failure_after_connect_to_gateway_error(
+    client: TestClient,
+    auth_headers: dict,
+    monkeypatch,
+    backend_error: httpx.RequestError,
+    expected_status: int,
+    expected_code: str,
+) -> None:
+    class StubService:
+        @staticmethod
+        def get_endpoint(sandbox_id: str, port: int, resolve_internal: bool = False, use_proxy_host: bool = False) -> Endpoint:
+            return Endpoint(endpoint="10.57.1.91:40109", headers={"X-Endpoint-Token": "endpoint-secret"})
+
+    monkeypatch.setattr(lifecycle, "sandbox_service", StubService())
+    fake_client = _FakeAsyncClient()
+    fake_client.connection_error = backend_error
+    _set_http_client(client, fake_client)
+
+    response = client.get(
+        "/v1/sandboxes/sbx-123/proxy/44772/healthz",
+        headers=auth_headers,
+    )
+
+    assert response.status_code == expected_status
+    payload = response.json()
+    assert payload["code"] == expected_code
+    assert "10.57.1.91:40109" in payload["message"]
+    assert "endpoint-secret" not in payload["message"]
 
 
 def test_proxy_maps_unexpected_error_to_500(
@@ -1408,3 +1720,198 @@ def test_proxy_active_credential_vault_returns_sidecar_forbidden(
     assert response.content == b"forbidden\n"
     assert fake_client.built is not None
     assert fake_client.built["url"] == "http://10.57.1.91:18080/credential-vault/_active"
+
+
+def test_networkpolicy_route_forwards_egress_auth_header(
+    client: TestClient,
+    auth_headers: dict,
+    monkeypatch,
+) -> None:
+    class StubService:
+        @staticmethod
+        def get_endpoint(sandbox_id: str, port: int, resolve_internal: bool = False, use_proxy_host: bool = False) -> Endpoint:
+            assert port == 18080
+            return Endpoint(
+                endpoint="10.57.1.91:18080",
+                headers={OPEN_SANDBOX_EGRESS_AUTH_HEADER: "injected-egress-token"},
+            )
+
+    monkeypatch.setattr(lifecycle, "sandbox_service", StubService())
+
+    fake_client = _FakeAsyncClient()
+    fake_client.response = _FakeStreamingResponse(
+        status_code=200,
+        headers={"content-type": "application/json"},
+        chunks=[b'{"status":"ok"}'],
+    )
+    _set_http_client(client, fake_client)
+
+    response = client.get(
+        "/v1/sandboxes/sbx-123/networkpolicy",
+        headers={
+            **auth_headers,
+            OPEN_SANDBOX_EGRESS_AUTH_HEADER.lower(): "caller-fake-token",
+        },
+    )
+
+    assert response.status_code == 200
+    assert fake_client.built is not None
+    assert fake_client.built["url"] == "http://10.57.1.91:18080/policy"
+    # Ensure caller-supplied header was completely replaced and does not duplicate
+    egress_headers = [
+        (k, v)
+        for k, v in fake_client.built["headers"].items()
+        if k.lower() == OPEN_SANDBOX_EGRESS_AUTH_HEADER.lower()
+    ]
+    assert len(egress_headers) == 1
+    assert egress_headers[0][1] == "injected-egress-token"
+
+
+def test_credential_vault_route_forwards_egress_auth_header(
+    client: TestClient,
+    auth_headers: dict,
+    monkeypatch,
+) -> None:
+    """The server-routed credential vault proxies the sidecar surface with the
+    endpoint-resolved egress-auth token (internal=True), replacing any
+    caller-supplied value."""
+
+    class StubService:
+        @staticmethod
+        def get_endpoint(sandbox_id: str, port: int, resolve_internal: bool = False, use_proxy_host: bool = False) -> Endpoint:
+            assert port == 18080
+            return Endpoint(
+                endpoint="10.57.1.91:18080",
+                headers={OPEN_SANDBOX_EGRESS_AUTH_HEADER: "injected-egress-token"},
+            )
+
+    monkeypatch.setattr(lifecycle, "sandbox_service", StubService())
+
+    fake_client = _FakeAsyncClient()
+    fake_client.response = _FakeStreamingResponse(
+        status_code=200,
+        headers={"content-type": "application/json"},
+        chunks=[b'{"revision":1}'],
+    )
+    _set_http_client(client, fake_client)
+
+    response = client.get(
+        "/v1/sandboxes/sbx-123/credential-vault",
+        headers={
+            **auth_headers,
+            OPEN_SANDBOX_EGRESS_AUTH_HEADER.lower(): "caller-fake-token",
+        },
+    )
+
+    assert response.status_code == 200
+    assert fake_client.built is not None
+    assert fake_client.built["url"] == "http://10.57.1.91:18080/credential-vault"
+    egress_headers = [
+        (k, v)
+        for k, v in fake_client.built["headers"].items()
+        if k.lower() == OPEN_SANDBOX_EGRESS_AUTH_HEADER.lower()
+    ]
+    assert len(egress_headers) == 1
+    assert egress_headers[0][1] == "injected-egress-token"
+
+class _StubRenewCoordinator:
+    def __init__(self) -> None:
+        self.scheduled: list[str] = []
+
+    def schedule(self, sandbox_id: str) -> None:
+        self.scheduled.append(sandbox_id)
+
+
+def _install_renew_coordinator(client: TestClient) -> _StubRenewCoordinator:
+    coordinator = _StubRenewCoordinator()
+    cast(Any, client.app).state.proxy_renew_coordinator = coordinator
+    return coordinator
+
+
+def _proxy_ok_fake() -> _FakeAsyncClient:
+    fake = _FakeAsyncClient()
+    fake.response = _FakeStreamingResponse(
+        status_code=200, headers={"content-type": "text/plain"}, chunks=[b"ok"]
+    )
+    return fake
+
+
+class _RenewStubService:
+    @staticmethod
+    def get_endpoint(
+        sandbox_id: str,
+        port: int,
+        resolve_internal: bool = False,
+        use_proxy_host: bool = False,
+    ) -> Endpoint:
+        return Endpoint(endpoint="127.0.0.1:44772")
+
+
+@pytest.mark.parametrize("prefix", ["", "/v1"])
+def test_proxy_renew_intent_scheduled_by_default(
+    client: TestClient,
+    auth_headers: dict,
+    monkeypatch: pytest.MonkeyPatch,
+    prefix: str,
+) -> None:
+    monkeypatch.setattr(lifecycle, "sandbox_service", _RenewStubService())
+    fake_client = _proxy_ok_fake()
+    _set_http_client(client, fake_client)
+    coordinator = _install_renew_coordinator(client)
+
+    response = client.get(
+        f"{prefix}/sandboxes/sbx-renew/proxy/3000/status",
+        headers=auth_headers,
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 200
+    assert coordinator.scheduled == ["sbx-renew"]
+
+
+@pytest.mark.parametrize("prefix", ["", "/v1"])
+def test_proxy_renew_skip_header_suppresses_intent_and_strips_header(
+    client: TestClient,
+    auth_headers: dict,
+    monkeypatch: pytest.MonkeyPatch,
+    prefix: str,
+) -> None:
+    monkeypatch.setattr(lifecycle, "sandbox_service", _RenewStubService())
+    fake_client = _proxy_ok_fake()
+    _set_http_client(client, fake_client)
+    coordinator = _install_renew_coordinator(client)
+
+    response = client.get(
+        f"{prefix}/sandboxes/sbx-renew/proxy/3000/status",
+        headers={**auth_headers, "OpenSandbox-Access-Renew": "skip"},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 200
+    assert coordinator.scheduled == []
+    forwarded = fake_client.built["headers"]
+    assert all(k.lower() != "opensandbox-access-renew" for k in forwarded)
+
+
+@pytest.mark.parametrize("prefix", ["", "/v1"])
+def test_proxy_renew_skip_header_unknown_value_still_renews_but_strips(
+    client: TestClient,
+    auth_headers: dict,
+    monkeypatch: pytest.MonkeyPatch,
+    prefix: str,
+) -> None:
+    monkeypatch.setattr(lifecycle, "sandbox_service", _RenewStubService())
+    fake_client = _proxy_ok_fake()
+    _set_http_client(client, fake_client)
+    coordinator = _install_renew_coordinator(client)
+
+    response = client.get(
+        f"{prefix}/sandboxes/sbx-renew/proxy/3000/status",
+        headers={**auth_headers, "OpenSandbox-Access-Renew": "later"},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 200
+    assert coordinator.scheduled == ["sbx-renew"]
+    forwarded = fake_client.built["headers"]
+    assert all(k.lower() != "opensandbox-access-renew" for k in forwarded)

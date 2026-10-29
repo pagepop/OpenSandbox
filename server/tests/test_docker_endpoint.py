@@ -1,4 +1,4 @@
-# Copyright 2025 Alibaba Group Holding Ltd.
+# Copyright 2025 The OpenSandbox Authors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -27,7 +27,6 @@ from opensandbox_server.config import AppConfig, RuntimeConfig, DockerConfig, Se
 @pytest.fixture
 def mock_docker_service():
     """Create a DockerSandboxService with mocked docker client."""
-    # Setup base config
     config = AppConfig(
         server=ServerConfig(port=8080, host="0.0.0.0"),
         runtime=RuntimeConfig(type="docker", execd_image="test/execd:latest"),
@@ -39,7 +38,6 @@ def mock_docker_service():
         mock_client = MagicMock()
         mock_docker.return_value = mock_client
 
-        # Initialize service
         service = DockerSandboxService(config=config)
         # Inject the mock client directly to ensure we control it
         service.docker_client = mock_client
@@ -175,6 +173,33 @@ def test_get_endpoint_bridge_internal_resolution(mock_docker_service):
     assert endpoint.endpoint == "10.0.0.5:8080"
 
 
+def test_get_endpoint_user_mode_network_falls_back_to_host_mapped_endpoint(
+    mock_docker_service,
+):
+    """`pasta` / `slirp4netns` sandboxes have no host-routable container IP.
+
+    Podman reports an empty `IPAddress` and no `Networks` entry for them, so internal
+    resolution has to use the published host ports instead of raising
+    NETWORK_MODE_ENDPOINT_UNAVAILABLE.
+    """
+    service, mock_client = mock_docker_service
+    service.app_config.docker.network_mode = "pasta"
+    service.network_mode = "pasta"
+
+    labels = {SANDBOX_EMBEDDING_PROXY_PORT_LABEL: "50002"}
+    mock_container = MagicMock()
+    mock_container.attrs = {
+        "State": {"Running": True},
+        "Config": {"Labels": labels},
+        "NetworkSettings": {"IPAddress": "", "Networks": {}},
+    }
+    mock_client.containers.list.return_value = [mock_container]
+
+    endpoint = service.get_endpoint("sbx-123", 5900, resolve_internal=True)
+
+    assert endpoint.endpoint == "127.0.0.1:50002/proxy/5900"
+
+
 def test_get_endpoint_bridge_internal_resolution_with_egress_sidecar_falls_back_to_host_mapped_endpoint(
     mock_docker_service,
 ):
@@ -197,7 +222,7 @@ def test_get_endpoint_bridge_internal_resolution_with_egress_sidecar_falls_back_
     endpoint = service.get_endpoint("sbx-123", 18080, resolve_internal=True)
 
     assert endpoint.endpoint == "127.0.0.1:50002/proxy/18080"
-    assert endpoint.headers is None
+    assert endpoint.headers == {OPEN_SANDBOX_EGRESS_AUTH_HEADER: "egress-token"}
 
 
 def test_get_endpoint_bridge_internal_resolution_with_egress_sidecar_ignores_container_ip(
@@ -222,7 +247,7 @@ def test_get_endpoint_bridge_internal_resolution_with_egress_sidecar_ignores_con
     endpoint = service.get_endpoint("sbx-123", 18080, resolve_internal=True)
 
     assert endpoint.endpoint == "127.0.0.1:50002/proxy/18080"
-    assert endpoint.headers is None
+    assert endpoint.headers == {OPEN_SANDBOX_EGRESS_AUTH_HEADER: "egress-token"}
 
 
 def test_get_endpoint_bridge_internal_resolution_with_egress_sidecar_uses_proxy_host_not_eip(
@@ -249,7 +274,7 @@ def test_get_endpoint_bridge_internal_resolution_with_egress_sidecar_uses_proxy_
     endpoint = service.get_endpoint("sbx-123", 18080, resolve_internal=True)
 
     assert endpoint.endpoint == "127.0.0.1:50002/proxy/18080"
-    assert endpoint.headers is None
+    assert endpoint.headers == {OPEN_SANDBOX_EGRESS_AUTH_HEADER: "egress-token"}
 
 
 def test_get_endpoint_bridge_public_uses_eip_when_set(mock_docker_service):

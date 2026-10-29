@@ -1,4 +1,4 @@
-// Copyright 2026 Alibaba Group Holding Ltd.
+// Copyright 2026 The OpenSandbox Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -22,6 +22,32 @@ import (
 	"sync"
 	"time"
 )
+
+// serverProxyAuthHeader is the header the lifecycle server's auth middleware
+// reads. Data-plane requests routed through the server proxy authenticate with
+// the tenant API key in this header; direct-mode requests must not carry it.
+const serverProxyAuthHeader = "OPEN-SANDBOX-API-KEY"
+
+// hasHeaderFold reports whether headers already carries name under any HTTP
+// casing. Header names are case-insensitive, and endpoint-provided headers may
+// use any casing, so a plain map lookup would add a second, conflicting entry.
+func hasHeaderFold(headers map[string]string, name string) bool {
+	for key := range headers {
+		if strings.EqualFold(key, name) {
+			return true
+		}
+	}
+	return false
+}
+
+// deleteHeaderFold removes every casing of name from headers.
+func deleteHeaderFold(headers map[string]string, name string) {
+	for key := range headers {
+		if strings.EqualFold(key, name) {
+			delete(headers, key)
+		}
+	}
+}
 
 // SandboxCreateOptions configures sandbox creation.
 type SandboxCreateOptions struct {
@@ -103,11 +129,36 @@ type Sandbox struct {
 	lifecycle *LifecycleClient
 	execd     *ExecdClient
 	egress    *EgressClient
+	origin    SandboxOrigin
 	mu        sync.Mutex
 }
 
 // ID returns the sandbox identifier.
 func (s *Sandbox) ID() string { return s.id }
+
+// Origin reports what backs this sandbox (see SandboxOrigin).
+//
+// SandboxOriginTemplate when the sandbox runs on a fsb golden-image template:
+// set locally by CreateSandboxFromTemplate, and reported by the server's
+// OPEN-SANDBOX-ORIGIN response header otherwise (also honored for snapshot
+// restores, which boot the template's published artifact set).
+// SandboxOriginUnknown for everything else.
+//
+// Template-backed sandboxes route egress policy operations through the
+// lifecycle control plane (/sandboxes/{id}/networkpolicy) instead of the
+// sandbox-side egress sidecar.
+func (s *Sandbox) Origin() SandboxOrigin {
+	if s.origin == "" {
+		return SandboxOriginUnknown
+	}
+	return s.origin
+}
+
+// templateBacked reports whether this sandbox runs on a fsb golden-image
+// template and therefore has no sandbox-side egress sidecar.
+func (s *Sandbox) templateBacked() bool {
+	return s.origin == SandboxOriginTemplate
+}
 
 // CreateSandbox creates a new sandbox and waits for it to be ready.
 func CreateSandbox(ctx context.Context, config ConnectionConfig, opts SandboxCreateOptions) (*Sandbox, error) {
@@ -167,13 +218,130 @@ func CreateSandbox(ctx context.Context, config ConnectionConfig, opts SandboxCre
 		return nil, fmt.Errorf("opensandbox: create sandbox: %w", err)
 	}
 
+	return finishCreate(ctx, config, lc, created, startupSource, SandboxOriginUnknown, opts.readyOptions())
+}
+
+// SandboxFromTemplateOptions configures template-based sandbox creation.
+type SandboxFromTemplateOptions struct {
+	// TimeoutSeconds is the sandbox TTL. Required: the server rejects
+	// template-based creation without a timeout.
+	TimeoutSeconds int
+
+	// Metadata for filtering and tagging.
+	Metadata map[string]string
+
+	// NetworkPolicy for egress control.
+	NetworkPolicy *NetworkPolicy
+
+	// Extensions for provider-specific parameters.
+	Extensions map[string]string
+
+	// IdlePolicy is the optional idle behavior (OSEP-0024, fast-sandbox
+	// only). Control-plane state, not workload shape, so template mode
+	// accepts it.
+	IdlePolicy *IdlePolicy
+
+	// SkipHealthCheck skips the WaitUntilReady call after creation.
+	SkipHealthCheck bool
+
+	// ReadyTimeout overrides DefaultReadyTimeoutSeconds.
+	ReadyTimeout time.Duration
+
+	// HealthCheckInterval overrides DefaultHealthCheckPollingInterval.
+	HealthCheckInterval time.Duration
+
+	// HealthCheck is a custom health check function. If nil, execd /ping is used.
+	HealthCheck func(ctx context.Context, sb *Sandbox) (bool, error)
+}
+
+// CreateSandboxFromTemplate creates a new sandbox from a Succeeded fsb
+// template and waits for it to be ready.
+//
+// Template mode fixes the workload shape on the server: the entrypoint, env,
+// resources, volumes, platform and lifecycle hooks of the sandbox come from
+// the template's golden image and cannot be overridden here. Only metadata,
+// network policy, extensions and the OSEP-0024 idle policy (control-plane
+// state, not workload shape) may accompany the template ID, and the timeout
+// is required.
+func CreateSandboxFromTemplate(ctx context.Context, config ConnectionConfig, templateID string, opts SandboxFromTemplateOptions) (*Sandbox, error) {
+	if templateID == "" {
+		return nil, &InvalidArgumentError{Field: "templateID", Message: "template ID is required"}
+	}
+	if opts.TimeoutSeconds <= 0 {
+		return nil, &InvalidArgumentError{Field: "TimeoutSeconds", Message: "timeout is required when creating from a template"}
+	}
+	if err := opts.IdlePolicy.Validate(); err != nil {
+		return nil, err
+	}
+
+	lc := config.lifecycleClient()
+	startupSource := "template:" + templateID
+	started := time.Now()
+
+	req := CreateSandboxRequest{
+		TemplateID:    templateID,
+		Timeout:       &opts.TimeoutSeconds,
+		Metadata:      opts.Metadata,
+		NetworkPolicy: opts.NetworkPolicy,
+		Extensions:    opts.Extensions,
+	}
+	if opts.IdlePolicy != nil {
+		req.Lifecycle = &SandboxLifecycle{IdlePolicy: opts.IdlePolicy}
+	}
+
+	created, err := lc.CreateSandbox(ctx, req)
+	if err != nil {
+		reportSandboxCreateMetric(config, "", startupSource, time.Since(started).Milliseconds(), false)
+		return nil, fmt.Errorf("opensandbox: create sandbox from template: %w", err)
+	}
+
+	return finishCreate(ctx, config, lc, created, startupSource, SandboxOriginTemplate, opts.readyOptions())
+}
+
+// readyOptions is the shared subset of create options that controls the
+// post-create readiness flow.
+type readyOptions struct {
+	skipHealthCheck     bool
+	readyTimeout        time.Duration
+	healthCheckInterval time.Duration
+	healthCheck         func(ctx context.Context, sb *Sandbox) (bool, error)
+}
+
+func (o SandboxCreateOptions) readyOptions() readyOptions {
+	return readyOptions{
+		skipHealthCheck:     o.SkipHealthCheck,
+		readyTimeout:        o.ReadyTimeout,
+		healthCheckInterval: o.HealthCheckInterval,
+		healthCheck:         o.HealthCheck,
+	}
+}
+
+func (o SandboxFromTemplateOptions) readyOptions() readyOptions {
+	return readyOptions{
+		skipHealthCheck:     o.SkipHealthCheck,
+		readyTimeout:        o.ReadyTimeout,
+		healthCheckInterval: o.HealthCheckInterval,
+		healthCheck:         o.HealthCheck,
+	}
+}
+
+// finishCreate completes the shared create flow: wait for the sandbox to
+// reach Running, resolve execd, verify readiness, and report create metrics.
+// origin is the locally known sandbox origin (SandboxOriginUnknown unless the
+// caller created the sandbox from a template); the server can refine it via
+// the OPEN-SANDBOX-ORIGIN header during execd resolution. On failure the
+// created sandbox is deleted best-effort.
+func finishCreate(ctx context.Context, config ConnectionConfig, lc *LifecycleClient, created *SandboxInfo, startupSource string, origin SandboxOrigin, opts readyOptions) (*Sandbox, error) {
+	started := time.Now()
+
 	sb := &Sandbox{
 		id:        created.ID,
 		config:    &config,
 		lifecycle: lc,
+		origin:    origin,
 	}
 
-	if err := sb.waitForRunning(ctx, opts.ReadyTimeout); err != nil {
+	if err := sb.waitForRunning(ctx, opts.readyTimeout); err != nil {
 		// Best-effort cleanup
 		_ = lc.DeleteSandbox(context.Background(), created.ID)
 		reportSandboxCreateMetric(config, created.ID, startupSource, time.Since(started).Milliseconds(), false)
@@ -186,11 +354,11 @@ func CreateSandbox(ctx context.Context, config ConnectionConfig, opts SandboxCre
 		return nil, fmt.Errorf("opensandbox: resolve execd: %w", err)
 	}
 
-	if !opts.SkipHealthCheck {
+	if !opts.skipHealthCheck {
 		readyOpts := ReadyOptions{
-			Timeout:         opts.ReadyTimeout,
-			PollingInterval: opts.HealthCheckInterval,
-			HealthCheck:     opts.HealthCheck,
+			Timeout:         opts.readyTimeout,
+			PollingInterval: opts.healthCheckInterval,
+			HealthCheck:     opts.healthCheck,
 		}
 		if err := sb.WaitUntilReady(ctx, readyOpts); err != nil {
 			_ = lc.DeleteSandbox(context.Background(), created.ID)
@@ -284,7 +452,8 @@ func (s *Sandbox) Resume(ctx context.Context, opts ...ReadyOptions) (*Sandbox, e
 	return ResumeSandbox(ctx, *s.config, s.id, opts...)
 }
 
-// Kill terminates the sandbox. This is irreversible.
+// Kill requests irreversible sandbox termination.
+// Returns when deletion is accepted; runtime cleanup may continue afterward.
 func (s *Sandbox) Kill(ctx context.Context) error {
 	if s.lifecycle.cache != nil {
 		s.lifecycle.cache.Invalidate(s.id)
@@ -333,7 +502,9 @@ func (s *Sandbox) Ping(ctx context.Context) error {
 	return s.execd.Ping(ctx)
 }
 
-// Renew extends the sandbox's expiration by the given duration from now.
+// Renew sets the sandbox's expiration to the given duration from now.
+// This may shorten or extend the remaining lifetime. The creation-time
+// server timeout limit does not apply.
 func (s *Sandbox) Renew(ctx context.Context, duration time.Duration) (*RenewExpirationResponse, error) {
 	return s.lifecycle.RenewExpiration(ctx, s.id, time.Now().Add(duration))
 }
@@ -474,6 +645,14 @@ func (s *Sandbox) resolveExecd(ctx context.Context) error {
 		return err
 	}
 
+	// The server is authoritative about the runtime backing: for fsb-
+	// prefixed sandboxes it reports "template" even when the create used a
+	// snapshotId (a restore boots the template's published artifact set).
+	// Never overwrite locally known origin with a missing header.
+	if endpoint.Origin != "" {
+		s.origin = endpoint.Origin
+	}
+
 	execdURL := s.config.RewriteEndpointURL(endpoint.Endpoint)
 	if !strings.HasPrefix(execdURL, "http") {
 		execdURL = s.config.GetProtocol() + "://" + execdURL
@@ -484,9 +663,21 @@ func (s *Sandbox) resolveExecd(ctx context.Context) error {
 		headers[k] = v
 	}
 	if s.config.UseServerProxy {
-		if _, ok := headers[execdAuthHeader]; !ok {
+		// The server proxy authenticates data-plane requests with the tenant
+		// API key in OPEN-SANDBOX-API-KEY, the only header its auth middleware
+		// reads. Never reuse the execd token header here: the proxy forwards
+		// unknown headers to the backend, so that would send the tenant key
+		// into the untrusted sandbox (and still leave proxied requests
+		// unauthenticated).
+		//
+		// A caller-supplied key wins, whether it arrives in the endpoint
+		// headers or in ConnectionConfig.Headers. Both maps are merged into the
+		// request headers, so adding the fallback under a second casing would
+		// leave the effective value to map iteration order.
+		if !hasHeaderFold(headers, serverProxyAuthHeader) &&
+			!hasHeaderFold(s.config.Headers, serverProxyAuthHeader) {
 			if apiKey := s.config.GetAPIKey(); apiKey != "" {
-				headers[execdAuthHeader] = apiKey
+				headers[serverProxyAuthHeader] = apiKey
 			}
 		}
 	}
@@ -518,9 +709,15 @@ func (s *Sandbox) resolveEgress(ctx context.Context) error {
 		headers[k] = v
 	}
 	if s.config.UseServerProxy {
-		if _, ok := headers[egressAuthHeader]; !ok {
+		// Same server-proxy auth contract as resolveExecd: the tenant key goes
+		// in OPEN-SANDBOX-API-KEY, never in the egress auth header, which the
+		// proxy forwards into the sandbox. Caller-supplied keys in the endpoint
+		// headers or ConnectionConfig.Headers are preserved for the same reason
+		// as there.
+		if !hasHeaderFold(headers, serverProxyAuthHeader) &&
+			!hasHeaderFold(s.config.Headers, serverProxyAuthHeader) {
 			if apiKey := s.config.GetAPIKey(); apiKey != "" {
-				headers[egressAuthHeader] = apiKey
+				headers[serverProxyAuthHeader] = apiKey
 			}
 		}
 	}

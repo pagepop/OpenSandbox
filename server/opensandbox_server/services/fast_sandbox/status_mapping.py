@@ -1,7 +1,7 @@
 # pyright: reportAttributeAccessIssue=false
 # protobuf-generated modules expose dynamic attributes.
 
-# Copyright 2026 Alibaba Group Holding Ltd.
+# Copyright 2026 The OpenSandbox Authors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -31,9 +31,16 @@ from opensandbox_server.services.fast_sandbox.generated import fastpath_pb2 as p
 
 
 def map_state(info: pb2.SandboxInfo) -> str:
-    """Map a fast-sandbox SandboxInfo to the OpenSandbox lifecycle state."""
     if info.runtime.state == pb2.RUNTIME_STATE_STOPPED:
         return "Terminated"
+    # Pausing/Paused/Resuming precede the failure checks: an unavailable
+    # data plane is expected there, not a failure.
+    if info.runtime.state == pb2.RUNTIME_STATE_PAUSED:
+        return "Paused"
+    if info.runtime.state == pb2.RUNTIME_STATE_PAUSING:
+        return "Pausing"
+    if info.runtime.state == pb2.RUNTIME_STATE_RESUMING:
+        return "Resuming"
     if info.runtime.state in (
         pb2.RUNTIME_STATE_FAILED,
         pb2.RUNTIME_STATE_UNAVAILABLE,
