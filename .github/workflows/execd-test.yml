@@ -3,6 +3,13 @@ name: Execd Tests
 on:
   pull_request:
     branches: [ main ]
+  workflow_dispatch:
+    inputs:
+      linux_only:
+        description: 'Run Linux verification without Windows or self-hosted runners'
+        required: false
+        type: boolean
+        default: true
 
 permissions:
   contents: read
@@ -124,7 +131,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, self-hosted]
+        os: ${{ github.event_name == 'workflow_dispatch' && inputs.linux_only && fromJSON('["ubuntu-latest"]') || fromJSON('["ubuntu-latest", "windows-latest", "self-hosted"]') }}
     runs-on: ${{ matrix.os }}
     defaults:
       run:
@@ -335,7 +342,7 @@ jobs:
             ./pkg/runtime
 
   required:
-    name: Execd CI
+    name: ${{ github.event_name == 'workflow_dispatch' && inputs.linux_only && 'Execd Linux Verification' || 'Execd CI' }}
     if: always()
     needs: [changes, test, smoke, bwrap-smoke]
     runs-on: ubuntu-latest

@@ -21,6 +21,6 @@ Confirm effective server authentication and caller credentials without exposing 
 
 Consumers of execd 1.2 receive text records with their original line terminators and final fragment. Consumers that add missing line terminators must adapt before activation. Validate stdout/stderr, empty lines, CR/CRLF, unterminated output, diagnostic framing, cancellation, non-replay, file transfer, TTL, retained-instance reuse and volume persistence before activation.
 
-The Go SDK fork release must be published and resolvable before changing a consumer's committed dependency. A temporary local module replacement is only a compatibility test and must not enter production source.
+The Go SDK fork module version must be published and resolvable before changing a consumer's committed dependency. An immutable Go pseudo-version resolving to an already published fork commit is suitable for a test candidate; record its full source SHA and module checksums. A temporary local module replacement is only a compatibility test and must not enter production source.
 
 No image push, cluster update, host restart or live sandbox creation is part of local validation. Test and production activation require their own authorized release steps. Restore only artifacts that preserve the repaired CA boundary if recovery is required.
