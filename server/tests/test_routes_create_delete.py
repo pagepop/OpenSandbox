@@ -12,12 +12,23 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import json
+import logging
 from datetime import datetime, timedelta, timezone
+from unittest.mock import patch
+
+import pytest
+from fastapi import HTTPException
 
 from fastapi.testclient import TestClient
 
 from opensandbox_server.api import lifecycle
-from opensandbox_server.api.schema import CreateSandboxResponse, SandboxStatus
+from opensandbox_server.api.schema import (
+    CreateSandboxResponse,
+    RenewSandboxExpirationResponse,
+    SandboxStatus,
+)
+from opensandbox_server.services.constants import SandboxErrorCodes
 
 
 def test_create_sandbox_openapi_describes_synchronous_provisioning(
@@ -234,3 +245,76 @@ def test_delete_sandbox_requires_api_key(client: TestClient) -> None:
 
     assert response.status_code == 401
     assert response.json()["code"] == "MISSING_API_KEY"
+
+
+@pytest.mark.parametrize(
+    ("method", "path", "operation", "status", "result", "error_code"),
+    [
+        ("POST", "/v1/sandboxes", "create", 202, "accepted", None),
+        ("POST", "/v1/sandboxes", "create", 500, "error", SandboxErrorCodes.UNKNOWN_ERROR),
+        ("DELETE", "/v1/sandboxes/{id}", "delete", 204, "success", None),
+        ("POST", "/v1/sandboxes/{id}/renew-expiration", "renew_expiration", 200, "success", None),
+        ("POST", "/v1/sandboxes/{id}/renew-expiration", "renew_expiration", 409, "error",
+         SandboxErrorCodes.INVALID_EXPIRATION),
+        ("DELETE", "/v1/sandboxes/private-path-marker", "delete", 409, "error",
+         SandboxErrorCodes.UNKNOWN_ERROR),
+    ],
+)
+def test_lifecycle_event_reports_only_safe_fields(
+    client, auth_headers, sample_sandbox_request, monkeypatch,
+    method, path, operation, status, result, error_code,
+):
+    sandbox_id = "5c1d2d11-30ac-4215-a841-2cba90490214"
+    now = datetime.now(timezone.utc)
+
+    class StubService:
+        async def create_sandbox(self, request):
+            if status == 500:
+                raise RuntimeError("private-exception-marker")
+            return CreateSandboxResponse(
+                id=sandbox_id, status=SandboxStatus(state="Pending"),
+                createdAt=now, entrypoint=["private-entrypoint-marker"],
+            )
+
+        def delete_sandbox(self, requested_id):
+            if status == 409:
+                raise HTTPException(
+                    status_code=409,
+                    detail={"code": "private-error-code", "message": "private-message-marker"},
+                )
+
+        def renew_expiration(self, requested_id, request):
+            if status == 200:
+                return RenewSandboxExpirationResponse(expiresAt=request.expires_at)
+            raise HTTPException(
+                status_code=409,
+                detail={"code": SandboxErrorCodes.INVALID_EXPIRATION, "message": "private-message-marker"},
+            )
+
+    monkeypatch.setattr(lifecycle, "sandbox_service", StubService())
+    body = sample_sandbox_request if operation == "create" else None
+    if operation == "renew_expiration":
+        body = {"expiresAt": (now + timedelta(hours=1)).isoformat()}
+    with patch.object(lifecycle.lifecycle_logger, "log") as log:
+        if status == 500:
+            with pytest.raises(RuntimeError, match="private-exception-marker"):
+                client.request(method, path, headers=auth_headers, json=body)
+        else:
+            response = client.request(method, path.format(id=sandbox_id), headers=auth_headers, json=body)
+            assert response.status_code == status
+            if status == 409:
+                assert response.json()["message"] == "private-message-marker"
+    log.assert_called_once()
+    level, message = log.call_args.args
+    assert level == {409: logging.WARNING, 500: logging.ERROR}.get(status, logging.INFO)
+    event = json.loads(message)
+    duration = event.pop("duration_ms")
+    assert type(duration) is int and duration >= 0
+    expected = {
+        "event": "sandbox_lifecycle", "operation": operation, "result": result, "status_code": status,
+    }
+    if "{id}" in path or operation == "create" and status == 202:
+        expected["sandbox_id"] = sandbox_id
+    if error_code is not None:
+        expected["error_code"] = error_code
+    assert event == expected

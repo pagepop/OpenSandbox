@@ -272,6 +272,19 @@ For Kubernetes-backed sandboxes, pause/resume is implemented via `BatchSandbox.s
 
 `secureAccess` currently applies only to **Kubernetes** sandboxes exposed through **ingress gateway mode**. Direct endpoint exposure, including non-gateway ingress configurations, is not supported for secured access.
 
+## Lifecycle operation logs
+
+The create, renew-expiration, and delete handlers emit a `sandbox_lifecycle`
+event through the server logger. The JSON message includes the operation,
+outcome, HTTP status, and elapsed handler time in milliseconds. It includes the
+sandbox ID when a UUID or Fast Sandbox ID is available and a stable service error
+code on failure. The existing log prefix carries the request ID.
+
+A create response records acceptance of the request. Kubernetes workload
+readiness and expiration-driven removal are recorded by the controller.
+The event excludes request and response bodies, command data, and exception
+messages.
+
 ## Architecture
 
 ### Component Responsibilities

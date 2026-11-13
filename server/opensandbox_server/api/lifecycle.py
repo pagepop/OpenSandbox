@@ -19,7 +19,12 @@ This module defines FastAPI routes that map to the OpenAPI specification endpoin
 All business logic is delegated to the service layer that backs each operation.
 """
 
-from typing import List, Optional
+import json
+import logging
+import re
+from contextlib import contextmanager
+from time import perf_counter_ns
+from typing import Iterator, List, Optional
 
 from fastapi import APIRouter, Body, Header, HTTPException, Query, Request, status
 from fastapi.responses import Response
@@ -58,6 +63,51 @@ router = APIRouter(tags=["Sandboxes"])
 # Initialize service based on configuration from config.toml (defaults to docker)
 sandbox_service = create_sandbox_service()
 snapshot_service = create_snapshot_service(sandbox_service)
+
+
+lifecycle_logger = logging.getLogger("opensandbox_server.lifecycle")
+_LOG_SANDBOX_ID = re.compile(
+    r"(?:fsb-)?[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}"
+)
+_LOG_ERROR_CODES = frozenset(
+    value for name, value in vars(SandboxErrorCodes).items()
+    if name.isupper() and isinstance(value, str)
+)
+
+
+@contextmanager
+def _log_lifecycle_operation(
+    operation: str, success_status: int, sandbox_id: str | None = None
+) -> Iterator[dict[str, str | int]]:
+    # Create has no input ID. Its handler fills this in from the service response.
+    event: dict[str, str | int] = {"event": "sandbox_lifecycle", "operation": operation}
+    if sandbox_id is not None and _LOG_SANDBOX_ID.fullmatch(sandbox_id):
+        event["sandbox_id"] = sandbox_id
+    started = perf_counter_ns()
+    level = logging.INFO
+    try:
+        yield event
+    except HTTPException as exc:
+        level = logging.ERROR if exc.status_code >= 500 else logging.WARNING
+        code = exc.detail.get("code") if isinstance(exc.detail, dict) else None
+        if not isinstance(code, str) or code not in _LOG_ERROR_CODES:
+            code = SandboxErrorCodes.UNKNOWN_ERROR
+        event.update(result="error", status_code=exc.status_code, error_code=code)
+        raise
+    except Exception:
+        level = logging.ERROR
+        event.update(result="error", status_code=500, error_code=SandboxErrorCodes.UNKNOWN_ERROR)
+        raise
+    else:
+        event.update(
+            result="accepted" if success_status == status.HTTP_202_ACCEPTED else "success",
+            status_code=success_status,
+        )
+    finally:
+        # Cancellations and process shutdown are not completed HTTP operations.
+        if "result" in event:
+            event["duration_ms"] = (perf_counter_ns() - started) // 1_000_000
+            lifecycle_logger.log(level, json.dumps(event, separators=(",", ":")))
 
 
 # ============================================================================
@@ -109,8 +159,12 @@ async def create_sandbox(
     Raises:
         HTTPException: If sandbox creation scheduling fails
     """
-    validate_extensions(request.extensions)
-    return await sandbox_service.create_sandbox(request)
+    with _log_lifecycle_operation("create", status.HTTP_202_ACCEPTED) as event:
+        validate_extensions(request.extensions)
+        response = await sandbox_service.create_sandbox(request)
+        if _LOG_SANDBOX_ID.fullmatch(response.id):
+            event["sandbox_id"] = response.id
+        return response
 
 
 # Search endpoint
@@ -272,9 +326,9 @@ def delete_sandbox(
     Raises:
         HTTPException: If sandbox not found or deletion fails
     """
-    # Delegate to the service layer for deletion
-    sandbox_service.delete_sandbox(sandbox_id)
-    return Response(status_code=status.HTTP_204_NO_CONTENT)
+    with _log_lifecycle_operation("delete", status.HTTP_204_NO_CONTENT, sandbox_id):
+        sandbox_service.delete_sandbox(sandbox_id)
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 # ============================================================================
@@ -391,8 +445,8 @@ def renew_sandbox_expiration(
     Raises:
         HTTPException: If sandbox not found or renewal fails
     """
-    # Delegate to the service layer for expiration updates
-    return sandbox_service.renew_expiration(sandbox_id, request)
+    with _log_lifecycle_operation("renew_expiration", status.HTTP_200_OK, sandbox_id):
+        return sandbox_service.renew_expiration(sandbox_id, request)
 
 
 # ============================================================================
