@@ -141,7 +141,7 @@ func (c *Controller) runCommand(ctx context.Context, request *ExecuteCodeRequest
 		c.tailStdPipe(stderrPath, request.Hooks.OnExecuteStderr, done)
 	})
 
-	err = cmd.Start()
+	memoryGroup, err := startCommandWithMemoryBudget(cmd)
 	if err != nil {
 		close(done)
 		wg.Wait()
@@ -212,13 +212,21 @@ func (c *Controller) runCommand(ctx context.Context, request *ExecuteCodeRequest
 	err = cmd.Wait()
 	close(done)
 	wg.Wait()
+	memoryExceeded := memoryGroup.finish()
+	if memoryExceeded {
+		err = errCommandMemoryLimit
+	}
 	if err != nil {
 		var eName, eValue string
 		var eCode int
 		var traceback []string
 
 		var exitError *exec.ExitError
-		if errors.As(err, &exitError) {
+		if memoryExceeded {
+			eName = "CommandExecError"
+			eValue = strconv.Itoa(commandMemoryExitCode)
+			eCode = commandMemoryExitCode
+		} else if errors.As(err, &exitError) {
 			exitCode := exitError.ExitCode()
 			eName = "CommandExecError"
 			eValue = strconv.Itoa(exitCode)
@@ -297,7 +305,7 @@ func (c *Controller) runBackgroundCommand(ctx context.Context, cancel context.Ca
 		defer devNull.Close()
 	}
 
-	err = cmd.Start()
+	memoryGroup, err := startCommandWithMemoryBudget(cmd)
 	kernel := &commandKernel{
 		pid:          -1,
 		stdoutPath:   stdoutPath,
@@ -325,6 +333,11 @@ func (c *Controller) runBackgroundCommand(ctx context.Context, cancel context.Ca
 
 		err = cmd.Wait()
 		cancel()
+		if memoryGroup.finish() {
+			log.Error("CommandExecError: %v", errCommandMemoryLimit)
+			c.markCommandFinished(session, commandMemoryExitCode, errCommandMemoryLimit.Error())
+			return
+		}
 		if err != nil {
 			log.Error("CommandExecError: error running commands: %v", err)
 			exitCode := 1
