@@ -24,6 +24,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/alibaba/opensandbox/execd/pkg/log"
@@ -34,6 +35,11 @@ const cgroupMount = "/sys/fs/cgroup"
 
 type commandMemoryGroup struct {
 	dir string
+}
+
+var commandMemoryReaper struct {
+	sync.Mutex
+	pending map[string]struct{}
 }
 
 func startCommandWithMemoryBudget(cmd *exec.Cmd) (*commandMemoryGroup, error) {
@@ -177,13 +183,58 @@ func removeCommandMemoryGroup(dir string, oomKilled bool) {
 		if err == nil || os.IsNotExist(err) {
 			return
 		}
-		// Following a group OOM, the reaped command may precede its other
-		// killed descendants. Wait briefly for those tasks to leave the group.
-		// Do not wait or kill deliberately detached children on normal exit.
-		if !oomKilled || !errors.Is(err, unix.EBUSY) || !time.Now().Before(deadline) {
+		if !errors.Is(err, unix.EBUSY) {
 			log.Warn("remove command memory group: %v", err)
 			return
 		}
+		// Following a group OOM, the reaped command may precede its other
+		// killed descendants. Wait briefly for those tasks to leave the group.
+		if !oomKilled || !time.Now().Before(deadline) {
+			deferCommandMemoryRemoval(dir)
+			return
+		}
 		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func deferCommandMemoryRemoval(dir string) {
+	commandMemoryReaper.Lock()
+	defer commandMemoryReaper.Unlock()
+	if commandMemoryReaper.pending == nil {
+		commandMemoryReaper.pending = make(map[string]struct{})
+		go reapCommandMemoryGroups()
+	}
+	commandMemoryReaper.pending[dir] = struct{}{}
+}
+
+func reapCommandMemoryGroups() {
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+	for range ticker.C {
+		commandMemoryReaper.Lock()
+		if len(commandMemoryReaper.pending) == 0 {
+			commandMemoryReaper.pending = nil
+			commandMemoryReaper.Unlock()
+			return
+		}
+		dirs := make([]string, 0, len(commandMemoryReaper.pending))
+		for dir := range commandMemoryReaper.pending {
+			dirs = append(dirs, dir)
+		}
+		commandMemoryReaper.Unlock()
+
+		for _, dir := range dirs {
+			// The kernel rejects removal while the cgroup is populated.
+			err := os.Remove(dir)
+			if errors.Is(err, unix.EBUSY) {
+				continue
+			}
+			if err != nil && !os.IsNotExist(err) {
+				log.Warn("reap command memory group: %v", err)
+			}
+			commandMemoryReaper.Lock()
+			delete(commandMemoryReaper.pending, dir)
+			commandMemoryReaper.Unlock()
+		}
 	}
 }
