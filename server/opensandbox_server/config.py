@@ -858,6 +858,14 @@ class KubernetesRuntimeConfig(BaseModel):
         default=None,
         description="Path to BatchSandbox CR YAML template file. Used when workload_provider is 'batchsandbox'.",
     )
+    arp_refresh_init_image: Optional[str] = Field(
+        default=None,
+        pattern=r"^[^@\s]+@sha256:[a-f0-9]{64}$",
+        description=(
+            "Trusted digest-pinned Python image for the optional IPv4 Linux "
+            "BatchSandbox ARP refresh init container on a separate Pod network."
+        ),
+    )
     sandbox_create_timeout_seconds: int = Field(
         default=60,
         ge=1,
