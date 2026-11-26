@@ -1,4 +1,4 @@
-// Copyright 2026 Alibaba Group Holding Ltd.
+// Copyright 2026 The OpenSandbox Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -19,11 +19,6 @@ import (
 	"time"
 )
 
-// nextBackoff returns the next sleep duration given the previous one.
-//
-// prev <= 0 returns min. Otherwise the previous value is doubled, clamped to
-// [min, max], and perturbed by ±jitter*value. The result is clamped a second
-// time so jitter cannot exceed max or go below 1ns.
 func nextBackoff(prev, min, max time.Duration, jitter float64, rng func() float64) time.Duration {
 	if prev <= 0 {
 		return clampJitter(min, min, max, jitter, rng)
@@ -58,5 +53,4 @@ func clampJitter(d, min, max time.Duration, jitter float64, rng func() float64) 
 	return out
 }
 
-// defaultRNG wraps math/rand/v2 for production use.
 func defaultRNG() float64 { return rand.Float64() }

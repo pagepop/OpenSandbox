@@ -1,5 +1,5 @@
 /*
- * Copyright 2025 Alibaba Group Holding Ltd.
+ * Copyright 2025 The OpenSandbox Authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -19,29 +19,26 @@ package com.alibaba.opensandbox.sandbox.infrastructure.adapters.service
 import com.alibaba.opensandbox.sandbox.HttpClientProvider
 import com.alibaba.opensandbox.sandbox.api.execd.FilesystemApi
 import com.alibaba.opensandbox.sandbox.domain.exceptions.InvalidArgumentException
-import com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxApiException
-import com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxError
-import com.alibaba.opensandbox.sandbox.domain.exceptions.SandboxError.Companion.UNEXPECTED_RESPONSE
 import com.alibaba.opensandbox.sandbox.domain.models.execd.filesystem.ContentReplaceEntry
 import com.alibaba.opensandbox.sandbox.domain.models.execd.filesystem.ContentReplaceResult
 import com.alibaba.opensandbox.sandbox.domain.models.execd.filesystem.EntryInfo
 import com.alibaba.opensandbox.sandbox.domain.models.execd.filesystem.MoveEntry
+import com.alibaba.opensandbox.sandbox.domain.models.execd.filesystem.ReadBytesResponse
 import com.alibaba.opensandbox.sandbox.domain.models.execd.filesystem.SearchEntry
 import com.alibaba.opensandbox.sandbox.domain.models.execd.filesystem.SetPermissionEntry
 import com.alibaba.opensandbox.sandbox.domain.models.execd.filesystem.WriteEntry
 import com.alibaba.opensandbox.sandbox.domain.models.sandboxes.SandboxEndpoint
 import com.alibaba.opensandbox.sandbox.domain.services.Filesystem
+import com.alibaba.opensandbox.sandbox.domain.services.IdentityFilesystem
 import com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter.FilesystemConverter.toApiPermissionMap
 import com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter.FilesystemConverter.toApiRenameFileItems
 import com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter.FilesystemConverter.toApiReplaceFileContentMap
 import com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter.FilesystemConverter.toEntryInfo
 import com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter.FilesystemConverter.toEntryInfoMap
 import com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter.isFileNotFound
-import com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter.parseSandboxError
+import com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter.toSandboxApiException
 import com.alibaba.opensandbox.sandbox.infrastructure.adapters.converter.toSandboxException
 import kotlinx.serialization.json.buildJsonObject
-import kotlinx.serialization.json.intOrNull
-import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import okhttp3.Headers.Companion.toHeaders
 import okhttp3.HttpUrl.Companion.toHttpUrl
@@ -67,13 +64,18 @@ import java.nio.charset.Charset
 internal class FilesystemAdapter(
     private val httpClientProvider: HttpClientProvider,
     private val execdEndpoint: SandboxEndpoint,
-) : Filesystem {
+) : IdentityFilesystem {
     companion object {
         private const val FILESYSTEM_UPLOAD_PATH = "/files/upload"
         private const val FILESYSTEM_DOWNLOAD_PATH = "/files/download"
     }
 
     private val logger = LoggerFactory.getLogger(FilesystemAdapter::class.java)
+    private val unscopedEndpoint =
+        execdEndpoint.endpoint
+            .substringBefore("/v1/filesystem/")
+            .trimEnd('/')
+            .removeSuffix("/v1/filesystem")
     private val api =
         FilesystemApi(
             "${httpClientProvider.config.protocol}://${execdEndpoint.endpoint}",
@@ -88,6 +90,26 @@ internal class FilesystemAdapter(
                 .build(),
         )
 
+    override fun withIdentity(
+        uid: Long,
+        gid: Long,
+    ): Filesystem {
+        require(uid in 0..IdentityFilesystem.MAX_IDENTITY_ID) {
+            "uid must be between 0 and ${IdentityFilesystem.MAX_IDENTITY_ID}"
+        }
+        require(gid in 0..IdentityFilesystem.MAX_IDENTITY_ID) {
+            "gid must be between 0 and ${IdentityFilesystem.MAX_IDENTITY_ID}"
+        }
+        return FilesystemAdapter(
+            httpClientProvider,
+            SandboxEndpoint(
+                endpoint = unscopedEndpoint.trimEnd('/') + "/v1/filesystem/$uid/$gid",
+                headers = execdEndpoint.headers,
+                origin = execdEndpoint.origin,
+            ),
+        )
+    }
+
     override fun readFile(
         path: String,
         encoding: String,
@@ -97,17 +119,11 @@ internal class FilesystemAdapter(
     ): String {
         try {
             val request = buildDownloadRequest(path, range, offset, limit)
-            httpClientProvider.httpClient.newCall(request).execute().use { response ->
+            httpClientProvider.transferClient.newCall(request).execute().use { response ->
                 if (!response.isSuccessful) {
-                    val errorBodyString = response.body?.string()
-                    val sandboxError = parseSandboxError(errorBodyString)
-                    val message = "Failed to read file. Status code: ${response.code}, Body: $errorBodyString"
-                    throw SandboxApiException(
-                        message = message,
-                        statusCode = response.code,
-                        error = sandboxError ?: SandboxError(UNEXPECTED_RESPONSE),
-                        requestId = response.header("X-Request-ID"),
-                    )
+                    throw response.toSandboxApiException { statusCode, body ->
+                        "Failed to read file. Status code: $statusCode, Body: $body"
+                    }
                 }
 
                 val charset = getCharsetFromEncoding(encoding)
@@ -124,22 +140,24 @@ internal class FilesystemAdapter(
         range: String?,
         offset: Int?,
         limit: Int?,
-    ): ByteArray {
+    ): ByteArray = readByteArrayDetailed(path, range, offset, limit).body
+
+    override fun readByteArrayDetailed(
+        path: String,
+        range: String?,
+        offset: Int?,
+        limit: Int?,
+    ): ReadBytesResponse<ByteArray> {
         try {
             val request = buildDownloadRequest(path, range, offset, limit)
-            httpClientProvider.httpClient.newCall(request).execute().use { response ->
+            httpClientProvider.transferClient.newCall(request).execute().use { response ->
                 if (!response.isSuccessful) {
-                    val errorBodyString = response.body?.string()
-                    val sandboxError = parseSandboxError(errorBodyString)
-                    val message = "Failed to read file. Status code: ${response.code}, Body: $errorBodyString"
-                    throw SandboxApiException(
-                        message = message,
-                        statusCode = response.code,
-                        error = sandboxError ?: SandboxError(UNEXPECTED_RESPONSE),
-                        requestId = response.header("X-Request-ID"),
-                    )
+                    throw response.toSandboxApiException { statusCode, body ->
+                        "Failed to read file. Status code: $statusCode, Body: $body"
+                    }
                 }
-                return response.body?.bytes() ?: ByteArray(0)
+                val body = response.body?.bytes() ?: ByteArray(0)
+                return response.toReadBytesResponse(body, offset != null || limit != null)
             }
         } catch (e: Exception) {
             logReadFailure("Failed to read file as byte array: $path", e)
@@ -152,30 +170,35 @@ internal class FilesystemAdapter(
         range: String?,
         offset: Int?,
         limit: Int?,
-    ): InputStream {
+    ): InputStream = readStreamDetailed(path, range, offset, limit).body
+
+    override fun readStreamDetailed(
+        path: String,
+        range: String?,
+        offset: Int?,
+        limit: Int?,
+    ): ReadBytesResponse<InputStream> {
         try {
             val request = buildDownloadRequest(path, range, offset, limit)
-            val response = httpClientProvider.httpClient.newCall(request).execute()
+            val response = httpClientProvider.transferClient.newCall(request).execute()
 
             if (!response.isSuccessful) {
                 try {
-                    val errorBodyString = response.body?.string()
-                    val sandboxError = parseSandboxError(errorBodyString)
-                    val message = "Failed to read file. Status code: ${response.code}, Body: $errorBodyString"
-                    throw SandboxApiException(
-                        message = message,
-                        statusCode = response.code,
-                        error = sandboxError ?: SandboxError(UNEXPECTED_RESPONSE),
-                        requestId = response.header("X-Request-ID"),
-                    )
+                    throw response.toSandboxApiException { statusCode, body ->
+                        "Failed to read file. Status code: $statusCode, Body: $body"
+                    }
                 } catch (e: Exception) {
                     response.close()
                     throw e
                 }
             }
 
-            return response.body?.byteStream()
-                ?: throw IllegalStateException("Response body is null")
+            val responseBody =
+                response.body ?: run {
+                    response.close()
+                    throw IllegalStateException("Response body is null")
+                }
+            return response.toReadBytesResponse(responseBody.byteStream(), offset != null || limit != null)
         } catch (e: Exception) {
             logReadFailure("Failed to read file as stream: $path", e)
             throw e.toSandboxException()
@@ -240,17 +263,11 @@ internal class FilesystemAdapter(
                     .post(builder.build())
                     .build()
 
-            httpClientProvider.httpClient.newCall(request).execute().use { response ->
+            httpClientProvider.transferClient.newCall(request).execute().use { response ->
                 if (!response.isSuccessful) {
-                    val errorBodyString = response.body?.string()
-                    val sandboxError = parseSandboxError(errorBodyString)
-                    val message = "Failed to write files. Status code: ${response.code}, Body: $errorBodyString"
-                    throw SandboxApiException(
-                        message = message,
-                        statusCode = response.code,
-                        error = sandboxError ?: SandboxError(UNEXPECTED_RESPONSE),
-                        requestId = response.header("X-Request-ID"),
-                    )
+                    throw response.toSandboxApiException { statusCode, body ->
+                        "Failed to write files. Status code: $statusCode, Body: $body"
+                    }
                 }
             }
         } catch (e: Exception) {
@@ -330,7 +347,13 @@ internal class FilesystemAdapter(
     override fun replaceContents(entries: List<ContentReplaceEntry>) {
         try {
             val replaceMap = entries.toApiReplaceFileContentMap()
-            api.replaceContent(replaceMap)
+            try {
+                api.replaceContent(replaceMap)
+            } catch (_: NullPointerException) {
+                // Older execd versions return an empty body for verbose=false,
+                // which the generated client cannot deserialize. The replacement
+                // itself succeeded if no HTTP error was thrown.
+            }
         } catch (e: Exception) {
             logger.error("Failed to replace contents", e)
             throw e.toSandboxException()
@@ -340,50 +363,12 @@ internal class FilesystemAdapter(
     override fun replaceContentsDetailed(entries: List<ContentReplaceEntry>): List<ContentReplaceResult> {
         return try {
             val replaceMap = entries.toApiReplaceFileContentMap()
-            val jsonBody =
-                buildJsonObject {
-                    replaceMap.forEach { (path, item) ->
-                        put(
-                            path,
-                            buildJsonObject {
-                                put("old", item.old)
-                                put("new", item.new)
-                            },
-                        )
-                    }
-                }.toString()
-
-            val baseUrl = "${httpClientProvider.config.protocol}://${execdEndpoint.endpoint}"
-            val request =
-                Request.Builder()
-                    .url("$baseUrl/files/replace?verbose=true")
-                    .post(jsonBody.toRequestBody("application/json".toMediaType()))
-                    .apply { execdEndpoint.headers.forEach { (k, v) -> header(k, v) } }
-                    .build()
-
-            httpClientProvider.httpClient.newCall(request).execute().use { response ->
-                if (!response.isSuccessful) {
-                    val errorBody = response.body?.string()
-                    val sandboxError = parseSandboxError(errorBody)
-                    throw SandboxApiException(
-                        message = "Failed to replace contents. Status: ${response.code}, Body: $errorBody",
-                        statusCode = response.code,
-                        error = sandboxError ?: SandboxError(UNEXPECTED_RESPONSE),
-                        requestId = response.header("X-Request-ID"),
-                    )
-                }
-                val body = response.body?.string()
-                if (body.isNullOrBlank()) {
-                    emptyList()
-                } else {
-                    val parsed = kotlinx.serialization.json.Json.decodeFromString<Map<String, kotlinx.serialization.json.JsonObject>>(body)
-                    parsed.map { (path, result) ->
-                        ContentReplaceResult(
-                            path = path,
-                            replacedCount = result["replacedCount"]?.jsonPrimitive?.intOrNull ?: 0,
-                        )
-                    }
-                }
+            val response = api.replaceContent(replaceMap, verbose = true)
+            response.map { (path, result) ->
+                ContentReplaceResult(
+                    path = path,
+                    replacedCount = result.replacedCount,
+                )
             }
         } catch (e: Exception) {
             logger.error("Failed to replace contents", e)

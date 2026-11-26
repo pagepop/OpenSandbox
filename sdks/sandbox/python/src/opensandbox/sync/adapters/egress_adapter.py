@@ -1,5 +1,5 @@
 #
-# Copyright 2025 Alibaba Group Holding Ltd.
+# Copyright 2025 The OpenSandbox Authors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -22,6 +22,7 @@ from urllib.parse import quote
 
 import httpx
 
+from opensandbox._httpx import build_redirect_client_options
 from opensandbox.adapters.converter.exception_converter import ExceptionConverter
 from opensandbox.adapters.converter.response_handler import (
     handle_api_error,
@@ -112,21 +113,19 @@ class EgressAdapterSync(EgressSync):
         base_url = f"{self.connection_config.protocol}://{self.endpoint.endpoint}"
         timeout_seconds = self.connection_config.request_timeout.total_seconds()
         timeout = httpx.Timeout(timeout_seconds)
-        headers = {
-            "User-Agent": self.connection_config.user_agent,
-            **self.connection_config.headers,
-            **self.endpoint.headers,
-        }
+        headers = self.endpoint.build_request_headers(self.connection_config)
 
         self._client = Client(
             base_url=base_url,
             timeout=timeout,
+            follow_redirects=self.connection_config.follow_redirects,
         )
         self._httpx_client = httpx.Client(
             base_url=base_url,
             headers=headers,
             timeout=timeout,
             transport=self.connection_config.transport,
+            **build_redirect_client_options(self.connection_config, base_url),
         )
         self._client.set_httpx_client(self._httpx_client)
 
@@ -140,6 +139,7 @@ class EgressAdapterSync(EgressSync):
     ) -> object:
         response = self._httpx_client.request(method, path, json=json_body)
         if response.status_code >= 400:
+            logger.debug(f"{operation} failed with HTTP {response.status_code}")
             response.raise_for_status()
         if response.status_code == 204 or not response.content:
             return None
@@ -164,9 +164,8 @@ class EgressAdapterSync(EgressSync):
             )
             return CredentialVaultState.model_validate(payload)
         except Exception as e:
-            logger.error(
-                "Failed to create credential vault via endpoint %s",
-                self.endpoint.endpoint,
+            logger.debug(
+                f"Failed to create credential vault via endpoint {self.endpoint.endpoint}",
                 exc_info=e,
             )
             raise ExceptionConverter.to_sandbox_exception(e) from e
@@ -180,9 +179,8 @@ class EgressAdapterSync(EgressSync):
             )
             return CredentialVaultState.model_validate(payload)
         except Exception as e:
-            logger.error(
-                "Failed to get credential vault via endpoint %s",
-                self.endpoint.endpoint,
+            logger.debug(
+                f"Failed to get credential vault via endpoint {self.endpoint.endpoint}",
                 exc_info=e,
             )
             raise ExceptionConverter.to_sandbox_exception(e) from e
@@ -212,9 +210,8 @@ class EgressAdapterSync(EgressSync):
             )
             return CredentialVaultState.model_validate(payload)
         except Exception as e:
-            logger.error(
-                "Failed to patch credential vault via endpoint %s",
-                self.endpoint.endpoint,
+            logger.debug(
+                f"Failed to patch credential vault via endpoint {self.endpoint.endpoint}",
                 exc_info=e,
             )
             raise ExceptionConverter.to_sandbox_exception(e) from e
@@ -227,9 +224,8 @@ class EgressAdapterSync(EgressSync):
                 operation="Delete credential vault",
             )
         except Exception as e:
-            logger.error(
-                "Failed to delete credential vault via endpoint %s",
-                self.endpoint.endpoint,
+            logger.debug(
+                f"Failed to delete credential vault via endpoint {self.endpoint.endpoint}",
                 exc_info=e,
             )
             raise ExceptionConverter.to_sandbox_exception(e) from e
@@ -243,9 +239,8 @@ class EgressAdapterSync(EgressSync):
             )
             return CredentialListResponse.model_validate(payload).credentials
         except Exception as e:
-            logger.error(
-                "Failed to list credential vault credentials via endpoint %s",
-                self.endpoint.endpoint,
+            logger.debug(
+                f"Failed to list credential vault credentials via endpoint {self.endpoint.endpoint}",
                 exc_info=e,
             )
             raise ExceptionConverter.to_sandbox_exception(e) from e
@@ -259,9 +254,8 @@ class EgressAdapterSync(EgressSync):
             )
             return CredentialMetadata.model_validate(payload)
         except Exception as e:
-            logger.error(
-                "Failed to get credential vault credential via endpoint %s",
-                self.endpoint.endpoint,
+            logger.debug(
+                f"Failed to get credential vault credential via endpoint {self.endpoint.endpoint}",
                 exc_info=e,
             )
             raise ExceptionConverter.to_sandbox_exception(e) from e
@@ -275,9 +269,8 @@ class EgressAdapterSync(EgressSync):
             )
             return CredentialBindingListResponse.model_validate(payload).bindings
         except Exception as e:
-            logger.error(
-                "Failed to list credential vault bindings via endpoint %s",
-                self.endpoint.endpoint,
+            logger.debug(
+                f"Failed to list credential vault bindings via endpoint {self.endpoint.endpoint}",
                 exc_info=e,
             )
             raise ExceptionConverter.to_sandbox_exception(e) from e
@@ -291,9 +284,8 @@ class EgressAdapterSync(EgressSync):
             )
             return CredentialBindingMetadata.model_validate(payload)
         except Exception as e:
-            logger.error(
-                "Failed to get credential vault binding via endpoint %s",
-                self.endpoint.endpoint,
+            logger.debug(
+                f"Failed to get credential vault binding via endpoint {self.endpoint.endpoint}",
                 exc_info=e,
             )
             raise ExceptionConverter.to_sandbox_exception(e) from e
@@ -321,9 +313,8 @@ class EgressAdapterSync(EgressSync):
                 raise TypeError(f"Expected NetworkPolicy, got {type(policy).__name__}")
             return NetworkPolicy.model_validate(policy.to_dict())
         except Exception as e:
-            logger.error(
-                "Failed to get egress policy from endpoint %s",
-                self.endpoint.endpoint,
+            logger.debug(
+                f"Failed to get egress policy from endpoint {self.endpoint.endpoint}",
                 exc_info=e,
             )
             raise ExceptionConverter.to_sandbox_exception(e) from e
@@ -337,22 +328,24 @@ class EgressAdapterSync(EgressSync):
             from opensandbox.api.egress.models.network_rule_action import (
                 NetworkRuleAction,
             )
+            from opensandbox.api.egress.types import UNSET
 
             response_obj = patch_policy.sync_detailed(
                 client=self._client,
                 body=[
                     ApiNetworkRule(
                         action=NetworkRuleAction(rule.action),
-                        target=rule.target,
+                        # None here means UNSET (omit the field) in the client.
+                        target=rule.target if rule.target is not None else UNSET,
+                        ports=rule.ports if rule.ports is not None else UNSET,
                     )
                     for rule in rules
                 ],
             )
             handle_api_error(response_obj, "Patch egress rules")
         except Exception as e:
-            logger.error(
-                "Failed to patch egress policy via endpoint %s",
-                self.endpoint.endpoint,
+            logger.debug(
+                f"Failed to patch egress policy via endpoint {self.endpoint.endpoint}",
                 exc_info=e,
             )
             raise ExceptionConverter.to_sandbox_exception(e) from e
@@ -367,9 +360,8 @@ class EgressAdapterSync(EgressSync):
             )
             handle_api_error(response_obj, "Delete egress rules")
         except Exception as e:
-            logger.error(
-                "Failed to delete egress rules via endpoint %s",
-                self.endpoint.endpoint,
+            logger.debug(
+                f"Failed to delete egress rules via endpoint {self.endpoint.endpoint}",
                 exc_info=e,
             )
             raise ExceptionConverter.to_sandbox_exception(e) from e

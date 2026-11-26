@@ -1,4 +1,4 @@
-# Copyright 2026 Alibaba Group Holding Ltd.
+# Copyright 2026 The OpenSandbox Authors
 # 
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -18,13 +18,18 @@ from typing import Any, Callable, Dict, Optional
 
 from fastapi import HTTPException, status
 from kubernetes.client import (
+    V1AppArmorProfile,
+    V1Capabilities,
     V1Container,
     V1EnvVar,
     V1ResourceRequirements,
+    V1SeccompProfile,
+    V1SecurityContext,
     V1VolumeMount,
 )
 
 from opensandbox_server.api.schema import ImageSpec
+from opensandbox_server.extensions.keys import ISOLATION_UPPER_MOUNT_PATH
 from opensandbox_server.services.constants import SandboxErrorCodes
 from opensandbox_server.services.helpers import parse_gpu_request
 from opensandbox_server.services.k8s.egress_helper import (
@@ -46,30 +51,26 @@ _GPU_RESOURCE_LIMIT_KEY = "gpu"
 # (e.g. amd.com/gpu, gpu.intel.com/i915) can be added as a follow-up.
 _K8S_NVIDIA_GPU_RESOURCE = "nvidia.com/gpu"
 
+# resourceLimits disk-quota aliases, resolved with the same precedence as the
+# Docker runtime (_resolve_resource_limits) and the Windows profile
+# (windows_common). Kubernetes only accepts the canonical container resource
+# name `ephemeral-storage`, so the aliases must be translated instead of being
+# passed through verbatim as unknown resource keys (which the API server
+# rejects).
+_DISK_RESOURCE_LIMIT_KEYS = ("disk", "storage", "ephemeral-storage")
+_K8S_EPHEMERAL_STORAGE_RESOURCE = "ephemeral-storage"
+
 
 def _translate_resource_limits_for_k8s(
     resource_limits: Dict[str, str],
 ) -> Dict[str, str]:
     """Translate request-level resource limits into Kubernetes resource keys.
 
-    The lifecycle API exposes a portable ``gpu`` key on ``resourceLimits``.
-    Kubernetes requires the canonical extended-resource name
-    (``nvidia.com/gpu``) so the device plugin can schedule the request;
-    otherwise the value is silently treated as an unknown extended resource.
-
-    Args:
-        resource_limits: Raw resource limits from the create request.
-
-    Returns:
-        A new dict with the ``gpu`` key translated to ``nvidia.com/gpu``
-        and any unparseable GPU value dropped. Other keys (cpu, memory, ...)
-        are passed through unchanged.
-
-    Raises:
-        HTTPException: If ``gpu`` is the ``"all"`` sentinel. Docker accepts
-            ``"all"`` (mapped to an unbounded DeviceRequest), but Kubernetes
-            extended resources require an integer count, so we surface a
-            400 rather than silently scheduling without a GPU.
+    The portable ``gpu`` key becomes the canonical ``nvidia.com/gpu`` extended
+    resource; the ``disk``/``storage``/``ephemeral-storage`` aliases become the
+    ``ephemeral-storage`` container resource with Docker-runtime precedence;
+    other keys pass through unchanged. Raises HTTPException (400) for the
+    ``gpu="all"`` sentinel, which Kubernetes extended resources cannot express.
     """
     if not resource_limits:
         return {}
@@ -77,8 +78,17 @@ def _translate_resource_limits_for_k8s(
     translated: Dict[str, str] = {
         key: value
         for key, value in resource_limits.items()
-        if key != _GPU_RESOURCE_LIMIT_KEY
+        if key != _GPU_RESOURCE_LIMIT_KEY and key not in _DISK_RESOURCE_LIMIT_KEYS
     }
+
+    # The portable disk-quota key (canonical name `disk`, aliases `storage` /
+    # `ephemeral-storage`) becomes the Kubernetes container storage resource;
+    # the value keeps its Docker/Kubernetes-style quantity form, which the
+    # API server's quantity parser accepts.
+    for alias in _DISK_RESOURCE_LIMIT_KEYS:
+        if alias in resource_limits:
+            translated[_K8S_EPHEMERAL_STORAGE_RESOURCE] = resource_limits[alias]
+            break
 
     raw_gpu = resource_limits.get(_GPU_RESOURCE_LIMIT_KEY)
     if raw_gpu is None:
@@ -118,7 +128,17 @@ def _build_execd_init_container(
         "cp ./execd /opt/opensandbox/execd && "
         "cp ./bootstrap.sh /opt/opensandbox/bootstrap.sh && "
         "chmod +x /opt/opensandbox/execd && "
-        "chmod +x /opt/opensandbox/bootstrap.sh"
+        "chmod +x /opt/opensandbox/bootstrap.sh && "
+        "(cp /usr/local/bin/bwrap /opt/opensandbox/bwrap && "
+        "chmod +x /opt/opensandbox/bwrap || true) && "
+        "(test ! -e /usr/local/libexec/opensandbox-session-gate || "
+        "(cp /usr/local/libexec/opensandbox-session-gate "
+        "/opt/opensandbox/opensandbox-session-gate && "
+        "chmod 0555 /opt/opensandbox/opensandbox-session-gate)) && "
+        "(test ! -e /usr/local/libexec/opensandbox-launcher || "
+        "(cp /usr/local/libexec/opensandbox-launcher "
+        "/opt/opensandbox/opensandbox-launcher && "
+        "chmod 0555 /opt/opensandbox/opensandbox-launcher))"
     )
     security_context = None
     if disable_ipv6_for_egress:
@@ -155,7 +175,9 @@ def _build_main_container(
     resource_limits: Dict[str, str],
     *,
     has_network_policy: bool = False,
+    isolation_enabled: bool = False,
     image_pull_policy: Optional[str] = None,
+    resource_requests: Optional[Dict[str, str]] = None,
 ) -> V1Container:
     env_vars = [V1EnvVar(name=k, value=v) for k, v in env.items()]
     env_vars.append(V1EnvVar(name="EXECD", value="/opt/opensandbox/execd"))
@@ -163,9 +185,14 @@ def _build_main_container(
     translated_limits = _translate_resource_limits_for_k8s(resource_limits)
     resources = None
     if translated_limits:
+        translated_requests = (
+            _translate_resource_limits_for_k8s(resource_requests)
+            if resource_requests
+            else translated_limits
+        )
         resources = V1ResourceRequirements(
             limits=translated_limits,
-            requests=translated_limits,
+            requests=translated_requests,
         )
 
     volume_mounts = [
@@ -179,6 +206,24 @@ def _build_main_container(
     if has_network_policy:
         security_context_dict = build_security_context_for_sandbox_container(True)
         security_context = build_security_context_from_dict(security_context_dict)
+
+    if isolation_enabled:
+        security_context = security_context or V1SecurityContext()
+        caps = ["SYS_ADMIN"]
+        if security_context.capabilities:
+            existing = security_context.capabilities.add or []
+            caps = sorted(set(existing + caps))
+            security_context.capabilities.add = caps
+        else:
+            security_context.capabilities = V1Capabilities(add=caps)
+        security_context.seccomp_profile = V1SeccompProfile(type="Unconfined")
+        security_context.app_armor_profile = V1AppArmorProfile(type="Unconfined")
+        volume_mounts.append(
+            V1VolumeMount(
+                name="isolation-upper",
+                mount_path=ISOLATION_UPPER_MOUNT_PATH,
+            )
+        )
 
     return V1Container(
         name="sandbox",

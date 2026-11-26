@@ -1,4 +1,4 @@
-# Copyright 2026 Alibaba Group Holding Ltd.
+# Copyright 2026 The OpenSandbox Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -41,7 +41,7 @@ def _read_payload(payload_file: str) -> dict[str, Any]:
         raise
     except Exception as exc:
         raise click.ClickException(
-            f"Failed to read credential vault payload from {payload_file}."
+            f"Failed to read credential vault payload from {payload_file}: {exc}"
         ) from exc
 
     if not isinstance(payload, dict):

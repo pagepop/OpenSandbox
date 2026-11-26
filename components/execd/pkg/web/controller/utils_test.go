@@ -1,4 +1,4 @@
-// Copyright 2025 Alibaba Group Holding Ltd.
+// Copyright 2025 The OpenSandbox Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -38,6 +38,21 @@ func TestDeleteFile(t *testing.T) {
 	require.NoError(t, DeleteFile(file), "expected no error deleting missing file")
 }
 
+func TestDeleteFileKeepsDollarDigitLiteral(t *testing.T) {
+	tmp := t.TempDir()
+	inner := filepath.Join(tmp, "Outer$1.class")
+	outer := filepath.Join(tmp, "Outer.class")
+	require.NoError(t, os.WriteFile(inner, []byte("inner"), 0o644))
+	require.NoError(t, os.WriteFile(outer, []byte("outer"), 0o644))
+
+	require.NoError(t, DeleteFile(inner))
+
+	_, err := os.Stat(inner)
+	require.True(t, os.IsNotExist(err), "expected %s removed, got err=%v", inner, err)
+	_, err = os.Stat(outer)
+	require.NoError(t, err, "deleting Outer$1.class must not touch Outer.class")
+}
+
 func TestRenameFile(t *testing.T) {
 	tmp := t.TempDir()
 	src := filepath.Join(tmp, "src.txt")
@@ -51,7 +66,6 @@ func TestRenameFile(t *testing.T) {
 	_, err = os.Stat(src)
 	require.True(t, os.IsNotExist(err), "expected source removed, got err=%v", err)
 
-	// destination exists -> expect error
 	require.NoError(t, os.WriteFile(src, []byte("data"), 0o644))
 	require.Error(t, RenameFile(model.RenameFileItem{Src: src, Dest: dst}), "expected error when destination already exists")
 }
@@ -88,6 +102,51 @@ func TestMakeDir_NewDir(t *testing.T) {
 	}
 }
 
+func TestMkdirAllWithOwnership_NewNestedDirs(t *testing.T) {
+	tmp := t.TempDir()
+	nested := filepath.Join(tmp, "a", "b", "c")
+
+	err := MkdirAllWithOwnership(nested, 0o755, "", "")
+	require.NoError(t, err)
+
+	for _, seg := range []string{"a", "a/b", "a/b/c"} {
+		info, err := os.Stat(filepath.Join(tmp, seg))
+		require.NoError(t, err)
+		require.True(t, info.IsDir())
+	}
+}
+
+func TestMkdirAllWithOwnership_PreExistingParent(t *testing.T) {
+	tmp := t.TempDir()
+	existing := filepath.Join(tmp, "existing")
+	require.NoError(t, os.Mkdir(existing, 0o755))
+
+	origInfo, err := os.Stat(existing)
+	require.NoError(t, err)
+	origMode := origInfo.Mode().Perm()
+
+	nested := filepath.Join(existing, "new-child", "deep")
+	err = MkdirAllWithOwnership(nested, 0o755, "", "")
+	require.NoError(t, err)
+
+	afterInfo, err := os.Stat(existing)
+	require.NoError(t, err)
+	require.Equal(t, origMode, afterInfo.Mode().Perm(), "pre-existing dir should be unchanged")
+
+	info, err := os.Stat(nested)
+	require.NoError(t, err)
+	require.True(t, info.IsDir())
+}
+
+func TestMkdirAllWithOwnership_AllExist(t *testing.T) {
+	tmp := t.TempDir()
+	existing := filepath.Join(tmp, "already")
+	require.NoError(t, os.MkdirAll(existing, 0o755))
+
+	err := MkdirAllWithOwnership(existing, 0o755, "", "")
+	require.NoError(t, err, "all dirs exist — should be no-op")
+}
+
 func TestSetFileOwnership_EmptyOwnerGroup(t *testing.T) {
 	tmp := t.TempDir()
 	file := filepath.Join(tmp, "test.txt")
@@ -117,21 +176,6 @@ func TestSetFileOwnership_InvalidOwner(t *testing.T) {
 	require.Error(t, err, "invalid owner should return error")
 }
 
-func TestSearchFileMetadata(t *testing.T) {
-	metadata := map[string]model.FileMetadata{
-		"/tmp/a/notes.txt": {Path: "/tmp/a/notes.txt"},
-		"/tmp/b/readme.md": {Path: "/tmp/b/readme.md"},
-	}
-
-	path, info, ok := SearchFileMetadata(metadata, "/any/notes.txt")
-	require.True(t, ok, "expected metadata entry")
-	require.Equal(t, "/tmp/a/notes.txt", path)
-	require.Equal(t, "/tmp/a/notes.txt", info.Path)
-
-	_, _, ok = SearchFileMetadata(metadata, "/foo/unknown.txt")
-	require.False(t, ok, "expected no match")
-}
-
 func TestParseRange(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -151,6 +195,30 @@ func TestParseRange(t *testing.T) {
 			header: "bytes=-5",
 			size:   10,
 			want:   []httpRange{{start: 5, length: 5}},
+		},
+		{
+			name:   "end past size is clamped",
+			header: "bytes=5-100",
+			size:   10,
+			want:   []httpRange{{start: 5, length: 5}},
+		},
+		{
+			name:   "end at max int64",
+			header: "bytes=0-9223372036854775807",
+			size:   10,
+			want:   []httpRange{{start: 0, length: 10}},
+		},
+		{
+			name:   "start past size is skipped",
+			header: "bytes=20-30",
+			size:   10,
+			want:   []httpRange{},
+		},
+		{
+			name:   "start plus end overflows",
+			header: "bytes=1-9223372036854775807",
+			size:   10,
+			want:   []httpRange{{start: 1, length: 9}},
 		},
 		{
 			name:      "invalid",

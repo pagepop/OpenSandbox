@@ -1,5 +1,5 @@
 /*
- * Copyright 2025 Alibaba Group Holding Ltd.
+ * Copyright 2025 The OpenSandbox Authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -176,5 +176,41 @@ interface PoolStateStore {
         idleTtl: Duration,
     ) {
         // Default no-op.
+    }
+
+    /**
+     * Returns shared destroy state for this pool namespace.
+     *
+     * Stores that do not support destroy fencing should return ACTIVE. Destroy management APIs
+     * may still reject such stores when they cannot provide the stronger lifecycle semantics.
+     */
+    fun getDestroyState(poolName: String): PoolDestroyState = PoolDestroyState.ACTIVE
+
+    /**
+     * Starts a FORCE destroy operation by writing a DESTROYING fence.
+     */
+    fun beginDestroy(
+        poolName: String,
+        ownerId: String,
+    ) {
+        throw UnsupportedOperationException("Pool destroy is not supported by this PoolStateStore")
+    }
+
+    /**
+     * Clears persistent coordination data for the pool while preserving destroy state.
+     */
+    fun clearPoolState(poolName: String) {
+        throw UnsupportedOperationException("Pool destroy is not supported by this PoolStateStore")
+    }
+
+    /**
+     * Finishes destroy by writing the DESTROYED tombstone.
+     */
+    fun markDestroyed(
+        poolName: String,
+        ownerId: String,
+        tombstoneTtl: Duration?,
+    ) {
+        throw UnsupportedOperationException("Pool destroy is not supported by this PoolStateStore")
     }
 }

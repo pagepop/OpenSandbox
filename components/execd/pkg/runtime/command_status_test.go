@@ -1,4 +1,4 @@
-// Copyright 2025 Alibaba Group Holding Ltd.
+// Copyright 2025 The OpenSandbox Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -49,7 +49,6 @@ func TestGetCommandStatus_Running(t *testing.T) {
 	require.NoError(t, c.runBackgroundCommand(ctx, cancel, req))
 	require.NotEmpty(t, session, "session should be set by OnExecuteInit")
 
-	// Poll until status is registered (runBackgroundCommand stores kernel asynchronously).
 	deadline := time.Now().Add(5 * time.Second)
 	var (
 		status *CommandStatus
@@ -108,6 +107,54 @@ func TestSeekBackgroundCommandOutput_Completed(t *testing.T) {
 	require.Equal(t, stdoutContent, string(output))
 }
 
+func TestSeekBackgroundCommandOutput_ClampsCursorPastEOF(t *testing.T) {
+	c := NewController("", "")
+
+	tmpDir := t.TempDir()
+	session := "sess-past-eof"
+	stdoutPath := filepath.Join(tmpDir, session+".stdout")
+	require.NoError(t, os.WriteFile(stdoutPath, []byte("hello"), 0o644))
+
+	c.storeCommandKernel(session, &commandKernel{
+		pid:          789,
+		stdoutPath:   stdoutPath,
+		isBackground: true,
+		startedAt:    time.Now(),
+		running:      true,
+	})
+
+	output, cursor, err := c.SeekBackgroundCommandOutput(session, 10_000_000)
+	require.NoError(t, err)
+	require.Empty(t, output)
+	require.Equal(t, int64(5), cursor, "cursor should be clamped to the current end of the log")
+
+	require.NoError(t, os.WriteFile(stdoutPath, []byte("hello world"), 0o644))
+	output, cursor, err = c.SeekBackgroundCommandOutput(session, cursor)
+	require.NoError(t, err)
+	require.Equal(t, " world", string(output))
+	require.Equal(t, int64(11), cursor)
+}
+
+func TestSeekBackgroundCommandOutput_RejectsNegativeCursor(t *testing.T) {
+	c := NewController("", "")
+
+	tmpDir := t.TempDir()
+	session := "sess-negative"
+	stdoutPath := filepath.Join(tmpDir, session+".stdout")
+	require.NoError(t, os.WriteFile(stdoutPath, []byte("hello"), 0o644))
+
+	c.storeCommandKernel(session, &commandKernel{
+		pid:          790,
+		stdoutPath:   stdoutPath,
+		isBackground: true,
+		startedAt:    time.Now(),
+		running:      true,
+	})
+
+	_, _, err := c.SeekBackgroundCommandOutput(session, -1)
+	require.ErrorContains(t, err, "negative")
+}
+
 func TestSeekBackgroundCommandOutput_WithRunBackgroundCommand(t *testing.T) {
 	c := NewController("", "")
 
@@ -119,7 +166,6 @@ func TestSeekBackgroundCommandOutput_WithRunBackgroundCommand(t *testing.T) {
 		Hooks: ExecuteResultHook{
 			OnExecuteInit:     func(id string) { session = id },
 			OnExecuteComplete: func(executionTime time.Duration) {},
-			// other hooks unused in this test
 		},
 	}
 
@@ -145,7 +191,6 @@ func TestSeekBackgroundCommandOutput_WithRunBackgroundCommand(t *testing.T) {
 	require.Equal(t, expected, string(output))
 	require.GreaterOrEqual(t, cursor, int64(len(expected)), "cursor should advance to end of file")
 
-	// incremental seek from current cursor should return empty data and same-or-higher cursor
 	output2, cursor2, err := c.SeekBackgroundCommandOutput(session, cursor)
 	require.NoError(t, err, "SeekBackgroundCommandOutput (second call) error")
 	require.Empty(t, output2, "expected no new output")

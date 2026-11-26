@@ -1,4 +1,4 @@
-// Copyright 2026 Alibaba Group Holding Ltd.
+// Copyright 2026 The OpenSandbox Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -50,9 +50,6 @@ func (b *burstTracker) record() {
 	}
 }
 
-// exceeded reports whether the oldest of the last BurstMax launches falls
-// inside BurstWindow. With BurstMax=10 and window=5m, this triggers once 10
-// launches have all occurred within a 5-minute span.
 func (b *burstTracker) exceeded() bool {
 	if b.filled < b.max {
 		return false

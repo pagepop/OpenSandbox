@@ -1,5 +1,5 @@
 /*
- * Copyright 2025 Alibaba Group Holding Ltd.
+ * Copyright 2025 The OpenSandbox Authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,8 +16,10 @@
 
 package com.alibaba.opensandbox.sandbox.infrastructure.pool
 
+import com.alibaba.opensandbox.sandbox.domain.exceptions.PoolDestroyedException
 import com.alibaba.opensandbox.sandbox.domain.exceptions.PoolStateStoreUnavailableException
 import com.alibaba.opensandbox.sandbox.domain.pool.IdleEntry
+import com.alibaba.opensandbox.sandbox.domain.pool.PoolDestroyState
 import com.alibaba.opensandbox.sandbox.domain.pool.PoolStateStore
 import com.alibaba.opensandbox.sandbox.domain.pool.StoreCounters
 import com.alibaba.opensandbox.sandbox.domain.pool.TakeIdleResult
@@ -39,10 +41,11 @@ import java.util.Base64
  * Compound operations use Lua scripts so take, put, and owner-checked lock updates are atomic.
  *
  * This store intentionally does not create, configure, or close the Redis client. Callers own
- * the lifecycle and may pass any Jedis [UnifiedJedis] implementation appropriate for their environment.
- * The provided client must be safe for concurrent use because pool acquire, reconcile, resize,
- * snapshot, and release operations may call the store from different threads. [redis.clients.jedis.JedisPooled]
- * is the recommended client type. Do not share a single non-pooled Jedis connection across pool threads.
+ * the lifecycle and may pass any standalone or pooled Jedis [UnifiedJedis] implementation; Redis
+ * Cluster and Sentinel deployments are not supported (see the module README). The provided client
+ * must be safe for concurrent use because pool acquire, reconcile, resize, snapshot, and release
+ * operations may call the store from different threads. [redis.clients.jedis.JedisPooled] is the
+ * recommended client type. Do not share a single non-pooled Jedis connection across pool threads.
  */
 class RedisPoolStateStore(
     private val redis: UnifiedJedis,
@@ -106,10 +109,12 @@ class RedisPoolStateStore(
         require(sandboxId.isNotBlank()) { "sandboxId must not be blank" }
         execute("putIdle", poolName) {
             val idleTtlMillis = resolveIdleTtl(poolName).toMillis().coerceAtLeast(1).toString()
-            redis.eval(
-                PUT_IDLE_SCRIPT,
-                listOf(idleListKey(poolName), idleExpiresKey(poolName)),
-                listOf(sandboxId, idleTtlMillis),
+            evalFencedWrite(
+                operation = "putIdle",
+                poolName = poolName,
+                script = PUT_IDLE_SCRIPT,
+                keys = listOf(idleListKey(poolName), idleExpiresKey(poolName), destroyStateKey(poolName)),
+                args = listOf(sandboxId, idleTtlMillis),
             )
         }
     }
@@ -132,12 +137,13 @@ class RedisPoolStateStore(
         validateOwnerAndTtl(ownerId, ttl)
         return execute("tryAcquirePrimaryLock", poolName) {
             val ttlMillis = ttl.toMillis().coerceAtLeast(1)
-            val acquired = redis.set(primaryLockKey(poolName), ownerId, SetParams.setParams().nx().px(ttlMillis))
-            if (acquired == "OK") {
-                true
-            } else {
-                renewPrimaryLock(poolName, ownerId, ttl)
-            }
+            val result =
+                redis.eval(
+                    ACQUIRE_LOCK_SCRIPT,
+                    listOf(primaryLockKey(poolName), destroyStateKey(poolName)),
+                    listOf(ownerId, ttlMillis.toString()),
+                )
+            result == 1L
         }
     }
 
@@ -151,7 +157,7 @@ class RedisPoolStateStore(
             val result =
                 redis.eval(
                     RENEW_LOCK_SCRIPT,
-                    listOf(primaryLockKey(poolName)),
+                    listOf(primaryLockKey(poolName), destroyStateKey(poolName)),
                     listOf(ownerId, ttl.toMillis().coerceAtLeast(1).toString()),
                 )
             result == 1L
@@ -227,7 +233,13 @@ class RedisPoolStateStore(
     ) {
         require(maxIdle >= 0) { "maxIdle must be >= 0" }
         execute("setMaxIdle", poolName) {
-            redis.set(maxIdleKey(poolName), maxIdle.toString())
+            evalFencedWrite(
+                operation = "setMaxIdle",
+                poolName = poolName,
+                script = SET_VALUE_SCRIPT,
+                keys = listOf(maxIdleKey(poolName), destroyStateKey(poolName)),
+                args = listOf(maxIdle.toString()),
+            )
         }
     }
 
@@ -237,7 +249,77 @@ class RedisPoolStateStore(
     ) {
         require(!idleTtl.isNegative && !idleTtl.isZero) { "idleTtl must be positive" }
         execute("setIdleEntryTtl", poolName) {
-            redis.set(idleTtlKey(poolName), idleTtl.toMillis().coerceAtLeast(1).toString())
+            evalFencedWrite(
+                operation = "setIdleEntryTtl",
+                poolName = poolName,
+                script = SET_VALUE_SCRIPT,
+                keys = listOf(idleTtlKey(poolName), destroyStateKey(poolName)),
+                args = listOf(idleTtl.toMillis().coerceAtLeast(1).toString()),
+            )
+        }
+    }
+
+    override fun getDestroyState(poolName: String): PoolDestroyState =
+        execute("getDestroyState", poolName) {
+            when (redis.get(destroyStateKey(poolName))) {
+                PoolDestroyState.DESTROYING.name -> PoolDestroyState.DESTROYING
+                PoolDestroyState.DESTROYED.name -> PoolDestroyState.DESTROYED
+                else -> PoolDestroyState.ACTIVE
+            }
+        }
+
+    override fun beginDestroy(
+        poolName: String,
+        ownerId: String,
+    ) {
+        require(ownerId.isNotBlank()) { "ownerId must not be blank" }
+        execute("beginDestroy", poolName) {
+            val result =
+                redis.eval(
+                    BEGIN_DESTROY_SCRIPT,
+                    listOf(destroyStateKey(poolName), destroyOwnerKey(poolName)),
+                    listOf(PoolDestroyState.DESTROYING.name, PoolDestroyState.DESTROYED.name, ownerId),
+                )
+            if (result == FENCED_WRITE_REJECTED) {
+                throw PoolDestroyedException("Pool namespace is already DESTROYED: poolName=$poolName")
+            }
+        }
+    }
+
+    override fun clearPoolState(poolName: String) {
+        execute("clearPoolState", poolName) {
+            redis.del(
+                idleListKey(poolName),
+                idleExpiresKey(poolName),
+                primaryLockKey(poolName),
+                maxIdleKey(poolName),
+                idleTtlKey(poolName),
+            )
+        }
+    }
+
+    override fun markDestroyed(
+        poolName: String,
+        ownerId: String,
+        tombstoneTtl: Duration?,
+    ) {
+        require(ownerId.isNotBlank()) { "ownerId must not be blank" }
+        execute("markDestroyed", poolName) {
+            if (tombstoneTtl == null) {
+                redis.set(destroyStateKey(poolName), PoolDestroyState.DESTROYED.name)
+                redis.set(destroyOwnerKey(poolName), ownerId)
+            } else {
+                require(!tombstoneTtl.isNegative && !tombstoneTtl.isZero) {
+                    "tombstoneTtl must be positive"
+                }
+                val ttlMillis = tombstoneTtl.toMillis().coerceAtLeast(1)
+                redis.set(
+                    destroyStateKey(poolName),
+                    PoolDestroyState.DESTROYED.name,
+                    SetParams.setParams().px(ttlMillis),
+                )
+                redis.set(destroyOwnerKey(poolName), ownerId, SetParams.setParams().px(ttlMillis))
+            }
         }
     }
 
@@ -267,6 +349,10 @@ class RedisPoolStateStore(
 
     private fun idleTtlKey(poolName: String): String = poolKey(poolName, "idleTtlMillis")
 
+    private fun destroyStateKey(poolName: String): String = poolKey(poolName, "destroy:state")
+
+    private fun destroyOwnerKey(poolName: String): String = poolKey(poolName, "destroy:owner")
+
     private fun poolKey(
         poolName: String,
         suffix: String,
@@ -285,6 +371,8 @@ class RedisPoolStateStore(
             block()
         } catch (e: IllegalArgumentException) {
             throw e
+        } catch (e: PoolDestroyedException) {
+            throw e
         } catch (e: Exception) {
             throw PoolStateStoreUnavailableException(
                 message = "Redis pool state store operation failed: operation=$operation poolName=$poolName",
@@ -293,8 +381,24 @@ class RedisPoolStateStore(
         }
     }
 
+    private fun evalFencedWrite(
+        operation: String,
+        poolName: String,
+        script: String,
+        keys: List<String>,
+        args: List<String>,
+    ): Any? {
+        val result = redis.eval(script, keys, args)
+        if (result == FENCED_WRITE_REJECTED) {
+            val state = getDestroyState(poolName)
+            throw PoolDestroyedException("Pool namespace is $state: poolName=$poolName")
+        }
+        return result
+    }
+
     companion object {
         const val DEFAULT_KEY_PREFIX = "opensandbox:pool"
+        private const val FENCED_WRITE_REJECTED = -1L
 
         private const val TAKE_IDLE_SCRIPT =
             """
@@ -330,6 +434,10 @@ class RedisPoolStateStore(
 
         private const val PUT_IDLE_SCRIPT =
             """
+            local destroy_state = redis.call('GET', KEYS[3])
+            if destroy_state then
+              return -1
+            end
             local redis_time = redis.call('TIME')
             local now_ms = tonumber(redis_time[1]) * 1000 + math.floor(tonumber(redis_time[2]) / 1000)
             local expires_at = now_ms + tonumber(ARGV[2])
@@ -344,13 +452,54 @@ class RedisPoolStateStore(
             return 1
             """
 
-        private const val RENEW_LOCK_SCRIPT =
+        private const val ACQUIRE_LOCK_SCRIPT =
             """
+            local destroy_state = redis.call('GET', KEYS[2])
+            if destroy_state then
+              return 0
+            end
+            if redis.call('SET', KEYS[1], ARGV[1], 'NX', 'PX', ARGV[2]) then
+              return 1
+            end
             if redis.call('GET', KEYS[1]) == ARGV[1] then
               redis.call('PEXPIRE', KEYS[1], ARGV[2])
               return 1
             end
             return 0
+            """
+
+        private const val RENEW_LOCK_SCRIPT =
+            """
+            local destroy_state = redis.call('GET', KEYS[2])
+            if destroy_state then
+              return 0
+            end
+            if redis.call('GET', KEYS[1]) == ARGV[1] then
+              redis.call('PEXPIRE', KEYS[1], ARGV[2])
+              return 1
+            end
+            return 0
+            """
+
+        private const val SET_VALUE_SCRIPT =
+            """
+            local destroy_state = redis.call('GET', KEYS[2])
+            if destroy_state then
+              return -1
+            end
+            redis.call('SET', KEYS[1], ARGV[1])
+            return 1
+            """
+
+        private const val BEGIN_DESTROY_SCRIPT =
+            """
+            local destroy_state = redis.call('GET', KEYS[1])
+            if destroy_state == ARGV[2] then
+              return -1
+            end
+            redis.call('SET', KEYS[1], ARGV[1])
+            redis.call('SET', KEYS[2], ARGV[3])
+            return 1
             """
 
         private const val RELEASE_LOCK_SCRIPT =

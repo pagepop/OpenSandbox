@@ -1,4 +1,4 @@
-# Copyright 2025 Alibaba Group Holding Ltd.
+# Copyright 2025 The OpenSandbox Authors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -53,7 +53,6 @@ async def main() -> None:
         request_timeout=timedelta(seconds=60),
     )
 
-    # Inject Kimi settings into container environment for CLI access
     env = {
         "KIMI_API_KEY": kimi_api_key,
         "KIMI_BASE_URL": kimi_base_url,
@@ -75,7 +74,6 @@ async def main() -> None:
         )
         await _print_execution_logs(install_exec)
 
-        # Use Kimi CLI to send a message in non-interactive mode
         run_exec = await sandbox.commands.run(
             'kimi -p "Compute 1+1=?."'
         )

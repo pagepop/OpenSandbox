@@ -1,3 +1,17 @@
+# Copyright 2026 The OpenSandbox Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 """Built-in OpenSandbox skill metadata and rendering helpers."""
 
 from __future__ import annotations
@@ -39,12 +53,14 @@ BUILTIN_SKILLS: dict[str, SkillSpec] = {
         package_file="opensandbox-sandbox-lifecycle.md",
         title="OpenSandbox Sandbox Lifecycle",
         summary=(
-            "Create, inspect, renew, pause, resume, and terminate sandboxes "
-            "with the right defaults and follow-up checks."
+            "Create, inspect, renew, pause, resume, and terminate sandboxes, "
+            "manage template (golden-image) builds and snapshots, with the "
+            "right defaults and follow-up checks."
         ),
         trigger_hint=(
-            "Use when the user wants to create or manage a sandbox and needs "
-            "the exact OpenSandbox CLI/API flow."
+            "Use when the user wants to create or manage a sandbox, build or "
+            "use templates, or snapshot and restore sandboxes and needs the "
+            "exact OpenSandbox CLI/API flow."
         ),
         marker_id="opensandbox-sandbox-lifecycle",
     ),
@@ -116,7 +132,6 @@ def list_builtin_skills() -> list[SkillSpec]:
 
 
 def get_builtin_skill(slug: str) -> SkillSpec:
-    """Return a bundled skill definition."""
     return BUILTIN_SKILLS[slug]
 
 
@@ -130,7 +145,6 @@ def get_builtin_skill_source(skill: SkillSpec) -> Path:
 
 
 def read_skill_markdown(skill: SkillSpec) -> str:
-    """Load bundled skill markdown."""
     return get_builtin_skill_source(skill).read_text(encoding="utf-8")
 
 

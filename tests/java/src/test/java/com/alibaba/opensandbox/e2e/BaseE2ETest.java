@@ -1,5 +1,5 @@
 /*
- * Copyright 2025 Alibaba Group Holding Ltd.
+ * Copyright 2025 The OpenSandbox Authors
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -34,9 +34,6 @@ public abstract class BaseE2ETest {
 
     protected static final Logger logger = LoggerFactory.getLogger(BaseE2ETest.class);
 
-    // ==========================================
-    // Configuration Keys
-    // ==========================================
     private static final String PROP_API_KEY = "opensandbox.test.api.key";
     private static final String PROP_DOMAIN = "opensandbox.test.domain";
     private static final String PROP_PROTOCOL = "opensandbox.test.protocol";
@@ -47,9 +44,6 @@ public abstract class BaseE2ETest {
     private static final String ENV_IMG_DEFAULT = "OPENSANDBOX_SANDBOX_DEFAULT_IMAGE";
     private static final String ENV_USE_SERVER_PROXY = "OPENSANDBOX_TEST_USE_SERVER_PROXY";
 
-    // ==========================================
-    // Shared State (Static)
-    // ==========================================
     protected static final Properties testProperties = new Properties();
     protected static ConnectionConfig sharedConnectionConfig;
 
@@ -59,10 +53,16 @@ public abstract class BaseE2ETest {
     }
 
     protected static String getSandboxImage() {
-        return configValue(PROP_IMG_DEFAULT, ENV_IMG_DEFAULT, "opensandbox/code-interpreter:latest");
+        return configValue(
+                PROP_IMG_DEFAULT, ENV_IMG_DEFAULT, "opensandbox/code-interpreter:latest");
     }
 
     protected static ConnectionConfig createConnectionConfig(boolean useServerProxy) {
+        return createConnectionConfig(useServerProxy, false);
+    }
+
+    protected static ConnectionConfig createConnectionConfig(
+            boolean useServerProxy, boolean enableTracing) {
         String protocol = configValue(PROP_PROTOCOL, ENV_PROTOCOL, "http");
         return ConnectionConfig.builder()
                 .apiKey(configValue(PROP_API_KEY, ENV_API_KEY, "e2e-test"))
@@ -70,6 +70,7 @@ public abstract class BaseE2ETest {
                 .requestTimeout(Duration.ofMinutes(3))
                 .protocol(protocol)
                 .useServerProxy(useServerProxy || shouldUseServerProxy())
+                .enableTracing(enableTracing)
                 .build();
     }
 
@@ -116,9 +117,6 @@ public abstract class BaseE2ETest {
         logger.info("=== Starting test: {} ===", testInfo.getDisplayName());
     }
 
-    // ==========================================
-    // Shared assertion helpers (ported from python e2e style)
-    // ==========================================
     protected static long nowMs() {
         return System.currentTimeMillis();
     }

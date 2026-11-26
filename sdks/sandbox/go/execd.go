@@ -1,4 +1,4 @@
-// Copyright 2026 Alibaba Group Holding Ltd.
+// Copyright 2026 The OpenSandbox Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -25,6 +25,7 @@ import (
 	"net/url"
 	"os"
 	"strconv"
+	"strings"
 )
 
 // ExecdClient provides access to the OpenSandbox Execd API for code execution,
@@ -108,9 +109,15 @@ func (e *ExecdClient) InterruptCode(ctx context.Context, sessionID string) error
 }
 
 // CreateSession creates a new bash session and returns it with a session ID.
-func (e *ExecdClient) CreateSession(ctx context.Context) (*Session, error) {
+// An optional CreateSessionRequest sets the session's working directory.
+// At most one option is honored (first wins, matching DownloadFile).
+func (e *ExecdClient) CreateSession(ctx context.Context, opts ...CreateSessionRequest) (*Session, error) {
+	req := CreateSessionRequest{}
+	if len(opts) > 0 {
+		req = opts[0]
+	}
 	var result Session
-	err := e.client.doRequest(ctx, http.MethodPost, "/session", struct{}{}, &result)
+	err := e.client.doRequest(ctx, http.MethodPost, "/session", req, &result)
 	if err != nil {
 		return nil, err
 	}
@@ -132,7 +139,25 @@ func (e *ExecdClient) DeleteSession(ctx context.Context, sessionID string) error
 
 // RunCommand executes a shell command and streams output events via SSE.
 func (e *ExecdClient) RunCommand(ctx context.Context, req RunCommandRequest, handler EventHandler) error {
-	return e.client.doStreamRequest(ctx, http.MethodPost, "/command", req, handler)
+	if !req.Background {
+		return e.client.doStreamRequest(ctx, http.MethodPost, "/command", req, handler)
+	}
+	// Returning a private sentinel closes the response without masking callback errors.
+	complete := fmt.Errorf("background command started")
+	err := e.client.doStreamRequest(ctx, http.MethodPost, "/command", req, func(event StreamEvent) error {
+		if err := handler(event); err != nil {
+			return err
+		}
+		var payload struct{ Type string }
+		if json.Unmarshal([]byte(event.Data), &payload) == nil && payload.Type == "execution_complete" {
+			return complete
+		}
+		return nil
+	})
+	if err == complete {
+		return nil
+	}
+	return err
 }
 
 // InterruptCommand interrupts the currently running command execution.
@@ -154,17 +179,21 @@ func (e *ExecdClient) GetCommandStatus(ctx context.Context, commandID string) (*
 	return &result, nil
 }
 
-// GetCommandLogs returns stdout/stderr for a background command. Pass cursor=-1
-// or cursor=0 for the full log. The returned CommandLogsResponse includes the
-// tail cursor for incremental polling.
+// GetCommandLogs returns stdout/stderr for a background command. Pass a nil
+// cursor or cursor=0 for the full log. The returned CommandLogsResponse includes
+// the tail cursor for incremental polling.
 func (e *ExecdClient) GetCommandLogs(ctx context.Context, commandID string, cursor *int64) (*CommandLogsResponse, error) {
+	if cursor != nil && *cursor < 0 {
+		return nil, &InvalidArgumentError{Field: "cursor", Message: "must not be negative"}
+	}
+
 	path := "/command/" + url.PathEscape(commandID) + "/logs"
 	if cursor != nil {
 		path += "?cursor=" + strconv.FormatInt(*cursor, 10)
 	}
 
 	var result *CommandLogsResponse
-	err := e.client.withRetry(ctx, func() error {
+	err := e.client.withRetry(ctx, func(ctx context.Context) error {
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, e.client.baseURL+path, nil)
 		if err != nil {
 			return fmt.Errorf("opensandbox: create request: %w", err)
@@ -173,12 +202,14 @@ func (e *ExecdClient) GetCommandLogs(ctx context.Context, commandID string, curs
 		for k, v := range e.client.headers {
 			req.Header.Set(k, v)
 		}
-		if e.client.apiKey != "" {
+		// A caller-supplied auth header entry (any casing, including empty)
+		// takes precedence over the configured token.
+		if e.client.apiKey != "" && !hasHeaderName(req.Header, e.client.authHeader) {
 			req.Header.Set(e.client.authHeader, e.client.apiKey)
 		}
 		req.Header.Set("Accept", "text/plain")
 
-		resp, err := e.client.httpClient.Do(req)
+		resp, err := doAttempt(e.client.httpClient, req)
 		if err != nil {
 			return fmt.Errorf("opensandbox: do request: %w", err)
 		}
@@ -325,13 +356,19 @@ func (e *ExecdClient) UploadFiles(ctx context.Context, entries []UploadFileEntry
 
 	req.Header.Set("User-Agent", "OpenSandbox-Go-SDK/"+Version)
 	for k, v := range e.client.headers {
-		req.Header.Set(k, v)
+		// The generated multipart type includes the boundary used by the body.
+		// A client-wide default must not replace it.
+		if !strings.EqualFold(k, "Content-Type") {
+			req.Header.Set(k, v)
+		}
 	}
-	if e.client.apiKey != "" {
+	// A caller-supplied auth header entry (any casing, including empty)
+	// takes precedence over the configured token.
+	if e.client.apiKey != "" && !hasHeaderName(req.Header, e.client.authHeader) {
 		req.Header.Set(e.client.authHeader, e.client.apiKey)
 	}
 
-	resp, err := e.client.httpClient.Do(req)
+	resp, err := e.client.transferHTTPClient().Do(req)
 	if err != nil {
 		return fmt.Errorf("opensandbox: do request: %w", err)
 	}
@@ -417,10 +454,117 @@ type DownloadFileOptions struct {
 	Limit int
 }
 
+// ByteRange is a parsed Content-Range response header. Start and End are
+// inclusive byte offsets. Total is -1 when the complete file size is unknown.
+type ByteRange struct {
+	// Start is the inclusive first byte offset, or -1 if parsing failed.
+	Start int64
+	// End is the inclusive last byte offset, or -1 if parsing failed.
+	End int64
+	// Total is the complete file size, or -1 if unknown or parsing failed.
+	Total int64
+	// Raw is the original Content-Range header value.
+	Raw string
+}
+
+// DownloadFilesystem is the optional capability for HTTP download metadata.
+// ExecdClient implements it, including clients returned by FilesWithIdentity.
+// Callers must close the returned response body.
+type DownloadFilesystem interface {
+	DownloadFileResponse(context.Context, string, string, ...DownloadFileOptions) (*DownloadFileResponse, error)
+}
+
+// DownloadFileResponse contains a download body and its HTTP response
+// metadata. The caller must close Body.
+type DownloadFileResponse struct {
+	// Body contains the downloaded bytes and must be closed by the caller.
+	Body io.ReadCloser
+	// StatusCode is the complete HTTP response status code.
+	StatusCode int
+	// ContentType is the Content-Type response header.
+	ContentType string
+	// ContentDisposition is the Content-Disposition response header.
+	ContentDisposition string
+
+	// ContentLength is the size of the response body, or -1 when unknown.
+	// For partial responses it is the size of the returned byte range, not the
+	// complete file.
+	ContentLength int64
+
+	// TotalSize is the complete file size, or -1 when unknown.
+	TotalSize int64
+
+	// ContentRange is populated for a 206 response with a non-empty
+	// Content-Range header. If the header is malformed, Raw is preserved and
+	// the numeric fields are -1.
+	ContentRange *ByteRange
+}
+
+// IsPartial reports whether the server honored the Range request and returned
+// 206 Partial Content.
+func (r *DownloadFileResponse) IsPartial() bool {
+	return r != nil && r.StatusCode == http.StatusPartialContent
+}
+
+func parseContentRange(raw string) *ByteRange {
+	if raw == "" {
+		return nil
+	}
+
+	result := &ByteRange{Start: -1, End: -1, Total: -1, Raw: raw}
+	parts := strings.Fields(raw)
+	if len(parts) != 2 || !strings.EqualFold(parts[0], "bytes") {
+		return result
+	}
+
+	interval, totalText, ok := strings.Cut(parts[1], "/")
+	if !ok {
+		return result
+	}
+	startText, endText, ok := strings.Cut(interval, "-")
+	if !ok {
+		return result
+	}
+
+	start, err := strconv.ParseInt(startText, 10, 64)
+	if err != nil || start < 0 {
+		return result
+	}
+	end, err := strconv.ParseInt(endText, 10, 64)
+	if err != nil || end < start {
+		return result
+	}
+
+	total := int64(-1)
+	if totalText != "*" {
+		total, err = strconv.ParseInt(totalText, 10, 64)
+		if err != nil || total <= end {
+			return result
+		}
+	}
+
+	result.Start = start
+	result.End = end
+	result.Total = total
+	return result
+}
+
 // DownloadFile downloads a file from the sandbox. The caller must close the
 // returned io.ReadCloser. Pass rangeHeader (e.g. "bytes=0-1023") for partial
 // content, or empty string for the full file. Use opts for line-based reading.
+// Use DownloadFileResponse when response status or range metadata is needed.
 func (e *ExecdClient) DownloadFile(ctx context.Context, remotePath string, rangeHeader string, opts ...DownloadFileOptions) (io.ReadCloser, error) {
+	resp, err := e.DownloadFileResponse(ctx, remotePath, rangeHeader, opts...)
+	if err != nil {
+		return nil, err
+	}
+	return resp.Body, nil
+}
+
+// DownloadFileResponse downloads a file and returns both its body and response
+// metadata. Callers resuming a download should check IsPartial before appending
+// the body to an existing file.
+func (e *ExecdClient) DownloadFileResponse(ctx context.Context, remotePath string, rangeHeader string, opts ...DownloadFileOptions) (*DownloadFileResponse, error) {
 	params := url.Values{}
 	params.Set("path", remotePath)
 	if len(opts) > 0 {
@@ -435,7 +579,7 @@ func (e *ExecdClient) DownloadFile(ctx context.Context, remotePath string, range
 	reqPath := "/files/download?" + params.Encode()
 
 	var resp *http.Response
-	err := e.client.withRetry(ctx, func() error {
+	err := e.client.withRetry(ctx, func(ctx context.Context) error {
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, e.client.baseURL+reqPath, nil)
 		if err != nil {
 			return fmt.Errorf("opensandbox: create request: %w", err)
@@ -444,14 +588,16 @@ func (e *ExecdClient) DownloadFile(ctx context.Context, remotePath string, range
 		for k, v := range e.client.headers {
 			req.Header.Set(k, v)
 		}
-		if e.client.apiKey != "" {
+		// A caller-supplied auth header entry (any casing, including empty)
+		// takes precedence over the configured token.
+		if e.client.apiKey != "" && !hasHeaderName(req.Header, e.client.authHeader) {
 			req.Header.Set(e.client.authHeader, e.client.apiKey)
 		}
 		if rangeHeader != "" {
 			req.Header.Set("Range", rangeHeader)
 		}
 
-		r, err := e.client.httpClient.Do(req)
+		r, err := doAttempt(e.client.transferHTTPClient(), req)
 		if err != nil {
 			return fmt.Errorf("opensandbox: do request: %w", err)
 		}
@@ -459,13 +605,31 @@ func (e *ExecdClient) DownloadFile(ctx context.Context, remotePath string, range
 			defer r.Body.Close()
 			return handleError(r)
 		}
+		r.Body = keepAttemptBody(ctx, r.Body)
 		resp = r
 		return nil
 	})
 	if err != nil {
 		return nil, err
 	}
-	return resp.Body, nil
+
+	result := &DownloadFileResponse{
+		Body:               resp.Body,
+		StatusCode:         resp.StatusCode,
+		ContentType:        resp.Header.Get("Content-Type"),
+		ContentDisposition: resp.Header.Get("Content-Disposition"),
+		ContentLength:      resp.ContentLength,
+		TotalSize:          -1,
+	}
+	if resp.StatusCode == http.StatusPartialContent {
+		result.ContentRange = parseContentRange(resp.Header.Get("Content-Range"))
+		if result.ContentRange != nil {
+			result.TotalSize = result.ContentRange.Total
+		}
+	} else if !params.Has("offset") && !params.Has("limit") {
+		result.TotalSize = result.ContentLength
+	}
+	return result, nil
 }
 
 // CreateDirectory creates a directory at the given path with the specified mode.

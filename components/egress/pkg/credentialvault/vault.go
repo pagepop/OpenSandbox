@@ -1,4 +1,4 @@
-// Copyright 2026 Alibaba Group Holding Ltd.
+// Copyright 2026 The OpenSandbox Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -15,19 +15,29 @@
 package credentialvault
 
 import (
+	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/netip"
+	"net/url"
 	"os"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	"github.com/alibaba/opensandbox/egress/pkg/constants"
+	"github.com/alibaba/opensandbox/egress/pkg/hostselector"
+	"github.com/alibaba/opensandbox/egress/pkg/log"
+	"github.com/alibaba/opensandbox/egress/pkg/mitmpassthrough"
 	"github.com/alibaba/opensandbox/egress/pkg/mitmproxy"
 	"github.com/alibaba/opensandbox/egress/pkg/policy"
 )
@@ -38,8 +48,9 @@ const (
 )
 
 var (
-	ErrNotFound = errors.New("credential vault not found")
-	ErrExists   = errors.New("credential vault already exists")
+	ErrNotFound         = errors.New("credential vault not found")
+	ErrExists           = errors.New("credential vault already exists")
+	ErrRevisionConflict = errors.New("credential vault revision conflict")
 
 	headerFieldNamePattern = regexp.MustCompile(`^[A-Za-z0-9!#$%&'*+\-.^_` + "`" + `|~]+$`)
 	hostnameLabelPattern   = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$`)
@@ -61,25 +72,68 @@ var (
 	}
 )
 
+var activeSnapshotTagFallback atomic.Uint64
+
 type Store struct {
-	mu             sync.RWMutex
-	exists         bool
-	revision       int64
-	credentials    map[string]record
-	bindings       map[string]Binding
-	interceptPorts map[int]struct{}
-	mitmGate       *mitmproxy.HealthGate
-	requireToken   func() bool
+	mu                sync.RWMutex
+	exists            bool
+	revision          int64
+	credentials       map[string]record
+	bindings          map[string]Binding
+	activeTag         string
+	activeSnapshot    *ActiveSnapshot
+	mutationTag       string
+	mitmGate          *mitmproxy.HealthGate
+	requireToken      func() bool
+	sources           *SourceRegistry
+	strictMatch       bool
+	liveAdmission     bool
+	staticPassthrough mitmpassthrough.Config
+	resolverConfig    ResolverConfig
 }
 
 type record struct {
 	Name       string
 	SourceType string
-	Value      string
-	Revision   int64
+	Source     CredentialSource
+	// raw is the credential's source object exactly as delivered — what the
+	// internal relay GET returns so consumers can round-trip the revision.
+	raw      json.RawMessage
+	Revision int64
 }
 
 type CreateRequest struct {
+	Credentials []Credential `json:"credentials"`
+	Bindings    []Binding    `json:"bindings"`
+}
+
+// ReplaceRequest is a full-revision replace (relay PUT): the complete vault
+// JSON plus an optional revision precondition. With no vault present the
+// replace creates one. When expectedRevision is absent, Revision (the relay
+// GET's top-level field) is tolerated as the precondition, so a GET body can
+// be edited and PUT straight back; both present and differing is an error.
+type ReplaceRequest struct {
+	ExpectedRevision *int64 `json:"expectedRevision,omitempty"`
+	Revision         *int64 `json:"revision,omitempty"`
+	CreateRequest
+}
+
+// precondition resolves the effective revision precondition of a replace.
+func (req ReplaceRequest) precondition() (*int64, error) {
+	switch {
+	case req.ExpectedRevision == nil:
+		return req.Revision, nil
+	case req.Revision == nil || *req.Revision == *req.ExpectedRevision:
+		return req.ExpectedRevision, nil
+	default:
+		return nil, fmt.Errorf("ambiguous revision precondition: expectedRevision %d and revision %d differ", *req.ExpectedRevision, *req.Revision)
+	}
+}
+
+// FullRevision is the complete vault revision INCLUDING credential values —
+// the internal relay shape only (what a server-side PATCH merges against).
+type FullRevision struct {
+	Revision    int64        `json:"revision"`
 	Credentials []Credential `json:"credentials"`
 	Bindings    []Binding    `json:"bindings"`
 }
@@ -103,13 +157,8 @@ type BindingMutationSet struct {
 }
 
 type Credential struct {
-	Name   string                 `json:"name"`
-	Source InlineCredentialSource `json:"source"`
-}
-
-type InlineCredentialSource struct {
-	Type  string `json:"type"`
-	Value string `json:"value"`
+	Name   string          `json:"name"`
+	Source json.RawMessage `json:"source"`
 }
 
 type Binding struct {
@@ -120,22 +169,29 @@ type Binding struct {
 
 type Match struct {
 	Schemes []string `json:"schemes,omitempty"`
-	Ports   []int    `json:"ports,omitempty"`
+	Ports   []int    `json:"ports,omitempty"` // Deprecated: ignored, port is derived from scheme.
 	Hosts   []string `json:"hosts"`
 	Methods []string `json:"methods,omitempty"`
 	Paths   []string `json:"paths,omitempty"`
 }
 
 type Auth struct {
-	Type       string              `json:"type"`
-	Credential string              `json:"credential,omitempty"`
-	Name       string              `json:"name,omitempty"`
-	Headers    []CustomHeaderEntry `json:"headers,omitempty"`
+	Type          string              `json:"type,omitempty"`
+	Credential    string              `json:"credential,omitempty"`
+	Name          string              `json:"name,omitempty"`
+	Headers       []CustomHeaderEntry `json:"headers,omitempty"`
+	Substitutions []Substitution      `json:"substitutions,omitempty"`
 }
 
 type CustomHeaderEntry struct {
 	Name       string `json:"name"`
 	Credential string `json:"credential"`
+}
+
+type Substitution struct {
+	Credential  string   `json:"credential"`
+	Placeholder string   `json:"placeholder"`
+	In          []string `json:"in"`
 }
 
 type State struct {
@@ -168,8 +224,9 @@ type BindingMetadata struct {
 }
 
 type AuthMetadata struct {
-	Type string `json:"type"`
-	Name string `json:"name,omitempty"`
+	Type       string `json:"type,omitempty"`
+	Name       string `json:"name,omitempty"`
+	Credential string `json:"credential,omitempty"`
 }
 
 type ActiveSnapshot struct {
@@ -178,10 +235,19 @@ type ActiveSnapshot struct {
 	Redactions []string        `json:"redactions,omitempty"`
 }
 
+// ExchangeRef marks an exchange-resolved binding in snapshots: no material
+// is rendered locally, only the credential the per-request resolve path
+// consults (always exchange-sourced, per the cross-lock).
+type ExchangeRef struct {
+	Credential string `json:"credential"`
+}
+
 type ActiveBinding struct {
-	Name    string            `json:"name"`
-	Match   Match             `json:"match"`
-	Headers []InjectionHeader `json:"headers"`
+	Name          string                   `json:"name"`
+	Match         Match                    `json:"match"`
+	Headers       []InjectionHeader        `json:"headers"`
+	Substitutions *[]InjectionSubstitution `json:"substitutions,omitempty"`
+	Exchange      *ExchangeRef             `json:"exchange,omitempty"`
 }
 
 type InjectionHeader struct {
@@ -189,13 +255,56 @@ type InjectionHeader struct {
 	Value string `json:"value"`
 }
 
+type InjectionSubstitution struct {
+	Placeholder string   `json:"placeholder"`
+	Value       string   `json:"value"`
+	In          []string `json:"in"`
+}
+
+// NewLiveStore freezes the live runtime's static passthrough policy.
+func NewLiveStore(gate *mitmproxy.HealthGate, requireToken func() bool, config mitmpassthrough.Config) *Store {
+	store := NewStore(gate, requireToken)
+	store.liveAdmission = true
+	store.staticPassthrough = config
+	return store
+}
+
+// ResolverConfig reports whether the resolver operator configuration is
+// ready (D13): resolve timeout configured. The zero value is not ready —
+// exchange vaults fail closed until injected.
+type ResolverConfig struct {
+	TimeoutConfigured bool
+}
+
+func (c ResolverConfig) Ready() bool {
+	return c.TimeoutConfigured
+}
+
+// SetResolverConfig installs the exchange capability gate's readiness. Call
+// before serving vault mutations.
+func (v *Store) SetResolverConfig(config ResolverConfig) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	v.resolverConfig = config
+}
+
 func NewStore(mitmGate *mitmproxy.HealthGate, requireToken func() bool) *Store {
+	return NewStoreWithRegistry(mitmGate, requireToken, nil)
+}
+
+// Nil registry selects the built-in inline and exchange source providers.
+func NewStoreWithRegistry(mitmGate *mitmproxy.HealthGate, requireToken func() bool, registry *SourceRegistry) *Store {
+	if registry == nil {
+		registry = NewSourceRegistry()
+	}
 	return &Store{
-		credentials:    make(map[string]record),
-		bindings:       make(map[string]Binding),
-		interceptPorts: map[int]struct{}{80: {}, 443: {}},
-		mitmGate:       mitmGate,
-		requireToken:   requireToken,
+		credentials:  make(map[string]record),
+		bindings:     make(map[string]Binding),
+		mutationTag:  newActiveSnapshotTag(),
+		mitmGate:     mitmGate,
+		requireToken: requireToken,
+		sources:      registry,
+		strictMatch:  constants.IsTruthy(os.Getenv(constants.EnvCredentialVaultRequireScopedMatch)),
 	}
 }
 
@@ -206,37 +315,40 @@ func (v *Store) Create(req CreateRequest, pol *policy.NetworkPolicy) (State, err
 		return State{}, ErrExists
 	}
 
-	credentials := make(map[string]record, len(req.Credentials))
-	bindings := make(map[string]Binding, len(req.Bindings))
-	for _, c := range req.Credentials {
-		rec, err := normalizeCredential(c, 1)
-		if err != nil {
-			return State{}, err
-		}
-		if _, ok := credentials[rec.Name]; ok {
-			return State{}, fmt.Errorf("duplicate credential name %q", rec.Name)
-		}
-		credentials[rec.Name] = rec
-	}
-	for _, b := range req.Bindings {
-		nb, err := normalizeBinding(b)
-		if err != nil {
-			return State{}, err
-		}
-		if _, ok := bindings[nb.Name]; ok {
-			return State{}, fmt.Errorf("duplicate binding name %q", nb.Name)
-		}
-		bindings[nb.Name] = nb
-	}
-	if err := v.validateCandidate(credentials, bindings, pol); err != nil {
+	credentials, bindings, err := v.buildCreate(req, pol, 1)
+	if err != nil {
 		return State{}, err
 	}
-
-	v.exists = true
-	v.revision = 1
-	v.credentials = credentials
-	v.bindings = bindings
+	v.publishLocked(true, 1, credentials, bindings)
 	return v.sanitizedLocked(), nil
+}
+
+// Replace installs req as the complete vault revision: creates at revision 1
+// when no vault exists, otherwise swaps all credentials and bindings and
+// advances the revision. expectedRevision, when resolved, is the
+// create-or-replace precondition (ErrRevisionConflict on mismatch, including
+// a missing vault). Returns the sanitized state and whether it created.
+func (v *Store) Replace(req ReplaceRequest, pol *policy.NetworkPolicy) (State, bool, error) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	expected, err := req.precondition()
+	if err != nil {
+		return State{}, false, err
+	}
+	created := !v.exists
+	if expected != nil && (created || *expected != v.revision) {
+		return State{}, false, fmt.Errorf("%w: expectedRevision %d does not match current revision %d", ErrRevisionConflict, *expected, v.revision)
+	}
+	next := int64(1)
+	if !created {
+		next = v.revision + 1
+	}
+	credentials, bindings, err := v.buildCreate(req.CreateRequest, pol, next)
+	if err != nil {
+		return State{}, false, err
+	}
+	v.publishLocked(true, next, credentials, bindings)
+	return v.sanitizedLocked(), created, nil
 }
 
 func (v *Store) Patch(req MutationRequest, pol *policy.NetworkPolicy) (State, error) {
@@ -246,27 +358,36 @@ func (v *Store) Patch(req MutationRequest, pol *policy.NetworkPolicy) (State, er
 		return State{}, ErrNotFound
 	}
 	if req.ExpectedRevision != nil && *req.ExpectedRevision != v.revision {
-		return State{}, fmt.Errorf("expectedRevision %d does not match current revision %d", *req.ExpectedRevision, v.revision)
+		return State{}, fmt.Errorf("%w: expectedRevision %d does not match current revision %d", ErrRevisionConflict, *req.ExpectedRevision, v.revision)
 	}
 
 	nextRevision := v.revision + 1
-	credentials := cloneCredentialRecords(v.credentials)
-	bindings := cloneCredentialBindings(v.bindings)
-
-	if err := applyCredentialMutations(credentials, req.Credentials, nextRevision); err != nil {
+	credentials, bindings, err := v.buildPatch(req, pol, nextRevision)
+	if err != nil {
 		return State{}, err
 	}
-	if err := applyBindingMutations(bindings, req.Bindings); err != nil {
-		return State{}, err
-	}
-	if err := v.validateCandidate(credentials, bindings, pol); err != nil {
-		return State{}, err
-	}
-
-	v.revision = nextRevision
-	v.credentials = credentials
-	v.bindings = bindings
+	v.publishLocked(true, nextRevision, credentials, bindings)
 	return v.sanitizedLocked(), nil
+}
+
+// Reload installs an exact revision from durable state — the egress-restart
+// recovery path (vault file → memory at registration). The full validation
+// pipeline runs against pol; on error the store keeps its previous contents
+// and the caller treats the subject's vault as degraded. Per-credential
+// metadata revisions are not part of the file format: after a reload every
+// record carries the reloaded file revision.
+func (v *Store) Reload(revision int64, req CreateRequest, pol *policy.NetworkPolicy) error {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	if revision < 1 {
+		return fmt.Errorf("vault reload revision %d must be positive", revision)
+	}
+	credentials, bindings, err := v.buildCreate(req, pol, revision)
+	if err != nil {
+		return err
+	}
+	v.publishLocked(true, revision, credentials, bindings)
+	return nil
 }
 
 func (v *Store) Delete() error {
@@ -275,10 +396,7 @@ func (v *Store) Delete() error {
 	if !v.exists {
 		return ErrNotFound
 	}
-	v.exists = false
-	v.revision = 0
-	v.credentials = make(map[string]record)
-	v.bindings = make(map[string]Binding)
+	v.publishLocked(false, 0, make(map[string]record), make(map[string]Binding))
 	return nil
 }
 
@@ -291,70 +409,83 @@ func (v *Store) Sanitized() (State, error) {
 	return v.sanitizedLocked(), nil
 }
 
-func (v *Store) sanitizedLocked() State {
-	state := State{
-		Revision:    v.revision,
-		Credentials: make([]Metadata, 0, len(v.credentials)),
-		Bindings:    make([]BindingMetadata, 0, len(v.bindings)),
-	}
-	for _, c := range v.credentials {
-		state.Credentials = append(state.Credentials, Metadata{
-			Name:       c.Name,
-			SourceType: c.SourceType,
-			Revision:   c.Revision,
-		})
-	}
-	for _, b := range v.bindings {
-		state.Bindings = append(state.Bindings, BindingMetadata{
-			Name:     b.Name,
-			Revision: v.revision,
-			Match:    b.Match,
-			Auth:     sanitizeAuth(b.Auth),
-		})
-	}
-	sort.Slice(state.Credentials, func(i, j int) bool { return state.Credentials[i].Name < state.Credentials[j].Name })
-	sort.Slice(state.Bindings, func(i, j int) bool { return state.Bindings[i].Name < state.Bindings[j].Name })
-	return state
-}
-
-func (v *Store) ActiveSnapshot() (ActiveSnapshot, error) {
+// Full returns the complete revision including credential values — internal
+// relay surface only; the server strips values on public reads.
+func (v *Store) Full() (FullRevision, error) {
 	v.mu.RLock()
 	defer v.mu.RUnlock()
 	if !v.exists {
-		return ActiveSnapshot{}, ErrNotFound
+		return FullRevision{}, ErrNotFound
 	}
-	snapshot := ActiveSnapshot{
-		Revision: v.revision,
-		Bindings: make([]ActiveBinding, 0, len(v.bindings)),
+	full := FullRevision{
+		Revision:    v.revision,
+		Credentials: make([]Credential, 0, len(v.credentials)),
+		Bindings:    make([]Binding, 0, len(v.bindings)),
 	}
-	redactions := make(map[string]struct{})
-	names := make([]string, 0, len(v.bindings))
-	for name := range v.bindings {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-	for _, name := range names {
-		b := v.bindings[name]
-		headers, values, err := renderInjectionHeaders(b.Auth, v.credentials)
-		if err != nil {
-			return ActiveSnapshot{}, err
-		}
-		snapshot.Bindings = append(snapshot.Bindings, ActiveBinding{
-			Name:    b.Name,
-			Match:   b.Match,
-			Headers: headers,
+	for _, r := range v.credentials {
+		full.Credentials = append(full.Credentials, Credential{
+			Name:   r.Name,
+			Source: append(json.RawMessage(nil), r.raw...),
 		})
-		for _, value := range values {
-			if value != "" {
-				redactions[value] = struct{}{}
-			}
-		}
 	}
-	for value := range redactions {
-		snapshot.Redactions = append(snapshot.Redactions, value)
+	for _, b := range v.bindings {
+		full.Bindings = append(full.Bindings, cloneBinding(b))
 	}
-	sort.Strings(snapshot.Redactions)
-	return snapshot, nil
+	sort.Slice(full.Credentials, func(i, j int) bool { return full.Credentials[i].Name < full.Credentials[j].Name })
+	sort.Slice(full.Bindings, func(i, j int) bool { return full.Bindings[i].Name < full.Bindings[j].Name })
+	return full, nil
+}
+
+func (v *Store) sanitizedLocked() State {
+	return sanitizedState(v.revision, v.credentials, v.bindings)
+}
+
+func (v *Store) ActiveSnapshot() (ActiveSnapshot, error) {
+	return v.ActiveSnapshotWithContext(context.Background())
+}
+
+func (v *Store) ActiveSnapshotWithContext(ctx context.Context) (ActiveSnapshot, error) {
+	snapshot, _, _, err := v.ActiveSnapshotIfChanged(ctx, "")
+	return snapshot, err
+}
+
+// ActiveSnapshotIfChanged atomically compares the caller's opaque snapshot tag
+// with the active vault and renders credentials only when the tag differs.
+// The comparison and rendering share one read lock so a mutation cannot make
+// the returned revision and snapshot disagree.
+func (v *Store) ActiveSnapshotIfChanged(
+	ctx context.Context,
+	knownTag string,
+) (ActiveSnapshot, string, bool, error) {
+	v.mu.RLock()
+	defer v.mu.RUnlock()
+	if !v.exists {
+		return ActiveSnapshot{}, "", false, ErrNotFound
+	}
+	if knownTag != "" && knownTag == v.activeTag {
+		return ActiveSnapshot{Revision: v.revision}, v.activeTag, false, nil
+	}
+	if v.activeSnapshot != nil {
+		return cloneActiveSnapshot(*v.activeSnapshot), v.activeTag, true, nil
+	}
+	snapshot, err := renderActiveSnapshot(ctx, v.revision, v.credentials, v.bindings)
+	if err != nil {
+		return ActiveSnapshot{}, "", false, err
+	}
+	return snapshot, v.activeTag, true, nil
+}
+
+func newActiveSnapshotTag() string {
+	var value [16]byte
+	if _, err := rand.Read(value[:]); err == nil {
+		return hex.EncodeToString(value[:])
+	}
+	return fmt.Sprintf(
+		"fallback-%x-%x-%x",
+		os.Getpid(),
+		time.Now().UnixNano(),
+		activeSnapshotTagFallback.Add(1),
+	)
 }
 
 func (v *Store) ValidateActiveAgainstPolicy(pol *policy.NetworkPolicy) error {
@@ -366,7 +497,7 @@ func (v *Store) ValidateActiveAgainstPolicy(pol *policy.NetworkPolicy) error {
 	return v.validateCandidate(v.credentials, v.bindings, pol)
 }
 
-func (v *Store) Ready() error {
+func (v *Store) Ready(ctx context.Context) error {
 	if v.requireToken != nil && !v.requireToken() {
 		return fmt.Errorf("credential vault requires egress API auth token")
 	}
@@ -376,18 +507,30 @@ func (v *Store) Ready() error {
 	if constants.IsTruthy(os.Getenv(constants.EnvMitmproxySslInsecure)) {
 		return fmt.Errorf("credential vault rejects insecure upstream TLS mode")
 	}
-	if v.mitmGate != nil && v.mitmGate.MitmPending() {
+	if !constants.ModeUsesNft(os.Getenv(constants.EnvEgressMode)) {
+		return fmt.Errorf("credential vault requires dns+nft egress enforcement")
+	}
+	if v.mitmGate != nil && !v.mitmGate.WaitReady(ctx) {
 		return fmt.Errorf("credential proxy is not ready")
 	}
 	return nil
 }
 
 func (v *Store) validateCandidate(credentials map[string]record, bindings map[string]Binding, pol *policy.NetworkPolicy) error {
-	if len(bindings) > 0 && (pol == nil || len(pol.Egress) == 0) {
-		return fmt.Errorf("credential bindings require explicit networkPolicy.egress allow rules")
+	if len(bindings) > 0 && pol == nil {
+		return fmt.Errorf("credential vault bindings require an egress policy")
+	}
+	if len(bindings) > 0 && pol.DefaultAction != policy.ActionDeny {
+		log.Warnf("credential vault: default-allow egress policy is deprecated and may allow credential destination bypass; use defaultAction=deny")
+	}
+	if err := v.validateExchangeAdmission(credentials); err != nil {
+		return err
 	}
 	for _, b := range bindings {
 		if err := validateBindingCredentialRefs(b, credentials); err != nil {
+			return err
+		}
+		if err := validateAuthSourceCrossLock(b, credentials); err != nil {
 			return err
 		}
 		if err := v.validateBindingPolicy(b, pol); err != nil {
@@ -397,50 +540,74 @@ func (v *Store) validateCandidate(credentials map[string]record, bindings map[st
 	if err := validateBindingAmbiguity(bindings); err != nil {
 		return err
 	}
-	for name := range credentials {
-		if strings.TrimSpace(name) == "" {
-			return fmt.Errorf("credential name cannot be blank")
+	return nil
+}
+
+// validateExchangeAdmission fails closed on exchange-sourced credentials:
+// the live revision runtime never supports them; other stores require the
+// resolver operator configuration (D13). Inline-only vaults are unaffected.
+func (v *Store) validateExchangeAdmission(credentials map[string]record) error {
+	hasExchange := false
+	for _, credential := range credentials {
+		if credential.SourceType == "exchange" {
+			hasExchange = true
+			break
 		}
+	}
+	if !hasExchange {
+		return nil
+	}
+	if v.liveAdmission {
+		return fmt.Errorf("exchange credentials are not supported in the live revision runtime")
+	}
+	if !v.resolverConfig.Ready() {
+		return fmt.Errorf("exchange credentials are not supported until the credential resolver operator configuration is ready")
 	}
 	return nil
 }
 
 func (v *Store) validateBindingPolicy(b Binding, pol *policy.NetworkPolicy) error {
-	for _, port := range b.Match.Ports {
-		if _, ok := v.interceptPorts[port]; !ok {
-			return fmt.Errorf("binding %q port %d is not a configured transparent intercept port", b.Name, port)
+	if v.liveAdmission && slices.Contains(b.Match.Schemes, "https") {
+		for _, host := range b.Match.Hosts {
+			// Match the snapshot's exclusion of wildcards with an empty DNS language.
+			if strings.HasPrefix(host, "*.") && len(host[2:]) > 251 {
+				continue
+			}
+			selector, err := hostselector.ParseCanonical(host)
+			if err != nil {
+				return fmt.Errorf("binding %q host %q: invalid credential TLS selector: %w", b.Name, host, err)
+			}
+			if v.staticPassthrough.Overlaps(selector) {
+				return fmt.Errorf("binding %q host %q: credential TLS binding overlaps static passthrough", b.Name, host)
+			}
 		}
 	}
 	for _, host := range b.Match.Hosts {
 		if !explicitAllowCoversHost(pol, host) {
-			return fmt.Errorf("binding %q host %q is not covered by an explicit allow egress rule", b.Name, host)
+			return fmt.Errorf("binding %q host %q is not allowed by egress policy", b.Name, host)
 		}
-		if bindingHostMatchesIgnoreHosts(host) {
+		if !v.liveAdmission && bindingHostMatchesIgnoreHosts(host) {
 			return fmt.Errorf("binding %q host %q matches mitmproxy ignore_hosts", b.Name, host)
 		}
 	}
 	return nil
 }
 
-func normalizeCredential(c Credential, revision int64) (record, error) {
+func (v *Store) normalizeCredential(c Credential, revision int64) (record, error) {
 	name := strings.TrimSpace(c.Name)
 	if name == "" {
 		return record{}, fmt.Errorf("credential name cannot be blank")
 	}
-	sourceType := strings.TrimSpace(c.Source.Type)
-	if sourceType == "" {
-		sourceType = "inline"
+	raw := append(json.RawMessage(nil), c.Source...)
+	source, err := v.sources.Create(raw)
+	if err != nil {
+		return record{}, fmt.Errorf("credential %q: %w", name, err)
 	}
-	if sourceType != "inline" {
-		return record{}, fmt.Errorf("unsupported credential source type %q", sourceType)
-	}
-	if c.Source.Value == "" {
-		return record{}, fmt.Errorf("credential %q inline value cannot be empty", name)
-	}
-	return record{Name: name, SourceType: sourceType, Value: c.Source.Value, Revision: revision}, nil
+	return record{Name: name, SourceType: source.Type(), Source: source, raw: raw, Revision: revision}, nil
 }
 
 func normalizeBinding(b Binding) (Binding, error) {
+	b = cloneBinding(b)
 	b.Name = strings.TrimSpace(b.Name)
 	if b.Name == "" {
 		return Binding{}, fmt.Errorf("binding name cannot be blank")
@@ -454,12 +621,32 @@ func normalizeBinding(b Binding) (Binding, error) {
 	return b, nil
 }
 
+func (v *Store) normalizeBinding(b Binding) (Binding, error) {
+	methodsExplicit := len(b.Match.Methods) > 0
+	pathsExplicit := len(b.Match.Paths) > 0
+	normalized, err := normalizeBinding(b)
+	if err != nil {
+		return Binding{}, err
+	}
+	if v.strictMatch {
+		if !methodsExplicit {
+			return Binding{}, fmt.Errorf("binding %q: match.methods must be explicit when scoped-match enforcement is enabled", normalized.Name)
+		}
+		if !pathsExplicit {
+			return Binding{}, fmt.Errorf("binding %q: match.paths must be explicit when scoped-match enforcement is enabled", normalized.Name)
+		}
+		for _, path := range normalized.Match.Paths {
+			if path == "/*" {
+				return Binding{}, fmt.Errorf("binding %q: match.paths must not contain /* when scoped-match enforcement is enabled", normalized.Name)
+			}
+		}
+	}
+	return normalized, nil
+}
+
 func normalizeMatch(m *Match) error {
 	if len(m.Schemes) == 0 {
 		m.Schemes = []string{"https"}
-	}
-	if len(m.Ports) == 0 {
-		m.Ports = []int{443}
 	}
 	if len(m.Methods) == 0 {
 		m.Methods = []string{"GET", "POST", "PUT", "PATCH", "DELETE"}
@@ -478,10 +665,13 @@ func normalizeMatch(m *Match) error {
 		}
 		m.Schemes[i] = scheme
 	}
-	for _, port := range m.Ports {
-		if port <= 0 || port > 65535 {
-			return fmt.Errorf("invalid port %d", port)
+	if len(m.Ports) > 0 {
+		for _, port := range m.Ports {
+			if port != 80 && port != 443 {
+				return fmt.Errorf("unsupported port %d: only ports 80 and 443 are supported (derived from scheme)", port)
+			}
 		}
+		m.Ports = nil
 	}
 	for i, host := range m.Hosts {
 		normalized, err := normalizeCredentialHost(host)
@@ -505,7 +695,6 @@ func normalizeMatch(m *Match) error {
 		m.Paths[i] = path
 	}
 	dedupeStringsInPlace(&m.Schemes)
-	dedupeIntsInPlace(&m.Ports)
 	dedupeStringsInPlace(&m.Hosts)
 	dedupeStringsInPlace(&m.Methods)
 	dedupeStringsInPlace(&m.Paths)
@@ -550,10 +739,37 @@ func normalizeAuth(a *Auth) error {
 				return fmt.Errorf("customHeaders entry %q requires credential", h.Name)
 			}
 		}
+	case "passthrough":
+		if strings.TrimSpace(a.Credential) != "" {
+			return fmt.Errorf("passthrough auth does not accept credential")
+		}
+		if strings.TrimSpace(a.Name) != "" {
+			return fmt.Errorf("passthrough auth does not accept name")
+		}
+		if len(a.Headers) != 0 {
+			return fmt.Errorf("passthrough auth does not accept headers")
+		}
+	case "":
+		// Typeless: the exchange-only reference form; cross-lock enforces
+		// the exchange source. Headers resolve per request, never locally.
+		a.Credential = strings.TrimSpace(a.Credential)
+		if a.Credential == "" {
+			return fmt.Errorf("typeless auth requires credential")
+		}
+		if strings.TrimSpace(a.Name) != "" {
+			return fmt.Errorf("typeless auth does not accept name")
+		}
+		if len(a.Headers) != 0 {
+			return fmt.Errorf("typeless auth does not accept headers")
+		}
+		if len(a.Substitutions) != 0 {
+			return fmt.Errorf("typeless auth does not accept substitutions")
+		}
+		return nil
 	default:
 		return fmt.Errorf("unsupported auth type %q", a.Type)
 	}
-	return nil
+	return normalizeSubstitutions(a.Substitutions)
 }
 
 func validateCredentialHeaderName(name string) error {
@@ -575,30 +791,82 @@ func validateBindingCredentialRefs(b Binding, credentials map[string]record) err
 	return nil
 }
 
+// validateAuthSourceCrossLock pins the exchange reference discipline: static
+// auth types and substitutions render locally and reject exchange-sourced
+// credentials; the typeless form accepts only exchange-sourced ones.
+// passthrough references no auth credential.
+func validateAuthSourceCrossLock(b Binding, credentials map[string]record) error {
+	for _, name := range authCredentialRefs(b.Auth) {
+		rec, ok := credentials[name]
+		if !ok {
+			continue // unknown references are reported by validateBindingCredentialRefs
+		}
+		switch b.Auth.Type {
+		case "":
+			if rec.SourceType != "exchange" {
+				return fmt.Errorf("binding %q typeless auth requires an exchange credential, but %q is %s-sourced", b.Name, name, rec.SourceType)
+			}
+		case "passthrough":
+		default:
+			if rec.SourceType == "exchange" {
+				return fmt.Errorf("binding %q %s auth cannot reference the exchange credential %q; only the typeless auth form may use exchange credentials", b.Name, b.Auth.Type, name)
+			}
+		}
+	}
+	for _, name := range substitutionCredentialRefs(b.Auth) {
+		rec, ok := credentials[name]
+		if !ok {
+			continue
+		}
+		if rec.SourceType == "exchange" {
+			return fmt.Errorf("binding %q substitution cannot reference the exchange credential %q; substitutions render locally and only inline credentials support that", b.Name, name)
+		}
+	}
+	return nil
+}
+
 func credentialRefsForAuth(auth Auth) []string {
-	if auth.Type == "customHeaders" {
-		out := make([]string, 0, len(auth.Headers))
+	return append(authCredentialRefs(auth), substitutionCredentialRefs(auth)...)
+}
+
+func authCredentialRefs(auth Auth) []string {
+	var out []string
+	switch auth.Type {
+	case "customHeaders":
 		for _, h := range auth.Headers {
 			out = append(out, h.Credential)
 		}
-		return out
+	case "passthrough":
+	default:
+		if auth.Credential != "" {
+			out = append(out, auth.Credential)
+		}
 	}
-	return []string{auth.Credential}
+	return out
 }
 
-func renderInjectionHeaders(auth Auth, credentials map[string]record) ([]InjectionHeader, []string, error) {
-	valueFor := func(name string) (string, error) {
-		c, ok := credentials[name]
-		if !ok {
-			return "", fmt.Errorf("unknown credential %q", name)
-		}
-		return c.Value, nil
+func substitutionCredentialRefs(auth Auth) []string {
+	var out []string
+	for _, substitution := range auth.Substitutions {
+		out = append(out, substitution.Credential)
 	}
+	return out
+}
+
+func resolveCredentialValue(ctx context.Context, name string, credentials map[string]record) (string, error) {
+	c, ok := credentials[name]
+	if !ok {
+		return "", fmt.Errorf("unknown credential %q", name)
+	}
+	return c.Source.Resolve(ctx)
+}
+
+func renderInjectionHeaders(ctx context.Context, auth Auth, credentials map[string]record) ([]InjectionHeader, []string, error) {
 	var headers []InjectionHeader
 	var redactions []string
 	switch auth.Type {
 	case "bearer":
-		value, err := valueFor(auth.Credential)
+		value, err := resolveCredentialValue(ctx, auth.Credential, credentials)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -606,7 +874,7 @@ func renderInjectionHeaders(auth Auth, credentials map[string]record) ([]Injecti
 		headers = append(headers, InjectionHeader{Name: "Authorization", Value: rendered})
 		redactions = append(redactions, value, rendered)
 	case "basic":
-		value, err := valueFor(auth.Credential)
+		value, err := resolveCredentialValue(ctx, auth.Credential, credentials)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -614,7 +882,7 @@ func renderInjectionHeaders(auth Auth, credentials map[string]record) ([]Injecti
 		headers = append(headers, InjectionHeader{Name: "Authorization", Value: rendered})
 		redactions = append(redactions, value, rendered)
 	case "apiKey":
-		value, err := valueFor(auth.Credential)
+		value, err := resolveCredentialValue(ctx, auth.Credential, credentials)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -622,17 +890,127 @@ func renderInjectionHeaders(auth Auth, credentials map[string]record) ([]Injecti
 		redactions = append(redactions, value)
 	case "customHeaders":
 		for _, h := range auth.Headers {
-			value, err := valueFor(h.Credential)
+			value, err := resolveCredentialValue(ctx, h.Credential, credentials)
 			if err != nil {
 				return nil, nil, err
 			}
 			headers = append(headers, InjectionHeader{Name: h.Name, Value: value})
 			redactions = append(redactions, value)
 		}
+	case "passthrough":
+	case "":
+		// Typeless bindings render as snapshot markers only; this branch is
+		// defensive — renderActiveSnapshot never routes them here.
+		return nil, nil, fmt.Errorf("typeless exchange auth cannot be rendered as static injection headers")
 	default:
 		return nil, nil, fmt.Errorf("unsupported auth type %q", auth.Type)
 	}
 	return headers, redactions, nil
+}
+
+func renderSubstitutions(ctx context.Context, auth Auth, credentials map[string]record) ([]InjectionSubstitution, []string, error) {
+	substitutions := make([]InjectionSubstitution, 0, len(auth.Substitutions))
+	redactions := make([]string, 0, len(auth.Substitutions)*6)
+	for _, substitution := range auth.Substitutions {
+		value, err := resolveCredentialValue(ctx, substitution.Credential, credentials)
+		if err != nil {
+			return nil, nil, err
+		}
+		substitutions = append(substitutions, InjectionSubstitution{
+			Placeholder: substitution.Placeholder,
+			Value:       value,
+			In:          append([]string(nil), substitution.In...),
+		})
+		redactions = append(redactions, substitution.Placeholder)
+		redactions = append(redactions, substitutionRedactionVariants(value)...)
+	}
+	return substitutions, redactions, nil
+}
+
+func substitutionRedactionVariants(value string) []string {
+	urlEncoded := strings.ReplaceAll(url.QueryEscape(value), "+", "%20")
+	formEncoded := url.QueryEscape(value)
+	jsonEncoded := value
+	if data, err := json.Marshal(value); err == nil && len(data) >= 2 {
+		jsonEncoded = string(data[1 : len(data)-1])
+	}
+	return []string{
+		value,
+		urlEncoded,
+		lowercasePercentEscapes(urlEncoded),
+		formEncoded,
+		lowercasePercentEscapes(formEncoded),
+		jsonEncoded,
+		jsonASCIIEncodedStringContent(value),
+	}
+}
+
+func lowercasePercentEscapes(value string) string {
+	var b strings.Builder
+	changed := false
+	for i := 0; i < len(value); i++ {
+		if value[i] == '%' && i+2 < len(value) && isHexDigit(value[i+1]) && isHexDigit(value[i+2]) {
+			b.WriteByte('%')
+			b.WriteByte(lowerHexByte(value[i+1]))
+			b.WriteByte(lowerHexByte(value[i+2]))
+			i += 2
+			changed = true
+			continue
+		}
+		b.WriteByte(value[i])
+	}
+	if !changed {
+		return value
+	}
+	return b.String()
+}
+
+func isHexDigit(b byte) bool {
+	return ('0' <= b && b <= '9') || ('a' <= b && b <= 'f') || ('A' <= b && b <= 'F')
+}
+
+func lowerHexByte(b byte) byte {
+	if 'A' <= b && b <= 'F' {
+		return b + ('a' - 'A')
+	}
+	return b
+}
+
+func jsonASCIIEncodedStringContent(value string) string {
+	var b strings.Builder
+	for _, r := range value {
+		switch r {
+		case '\\':
+			b.WriteString(`\\`)
+		case '"':
+			b.WriteString(`\"`)
+		case '\b':
+			b.WriteString(`\b`)
+		case '\f':
+			b.WriteString(`\f`)
+		case '\n':
+			b.WriteString(`\n`)
+		case '\r':
+			b.WriteString(`\r`)
+		case '\t':
+			b.WriteString(`\t`)
+		default:
+			switch {
+			case r < 0x20:
+				fmt.Fprintf(&b, `\u%04x`, r)
+			case r < 0x80:
+				b.WriteRune(r)
+			case r <= 0xffff:
+				fmt.Fprintf(&b, `\u%04x`, r)
+			default:
+				v := r - 0x10000
+				high := 0xd800 + (v >> 10)
+				low := 0xdc00 + (v & 0x3ff)
+				fmt.Fprintf(&b, `\u%04x\u%04x`, high, low)
+			}
+		}
+	}
+	return b.String()
 }
 
 func sanitizeAuth(auth Auth) AuthMetadata {
@@ -640,11 +1018,56 @@ func sanitizeAuth(auth Auth) AuthMetadata {
 	switch auth.Type {
 	case "apiKey":
 		meta.Name = auth.Name
+	case "":
+		meta.Credential = auth.Credential
 	}
 	return meta
 }
 
-func applyCredentialMutations(credentials map[string]record, mutations *CredentialMutationSet, revision int64) error {
+func normalizeSubstitutions(substitutions []Substitution) error {
+	allowed := map[string]struct{}{
+		"path":   {},
+		"query":  {},
+		"header": {},
+		"body":   {},
+	}
+	seenPairs := make(map[[2]string]int)
+	for i := range substitutions {
+		substitution := &substitutions[i]
+		substitution.Credential = strings.TrimSpace(substitution.Credential)
+		if substitution.Credential == "" {
+			return fmt.Errorf("substitution %d requires credential", i)
+		}
+		if strings.TrimSpace(substitution.Placeholder) == "" {
+			return fmt.Errorf("substitution %d requires placeholder", i)
+		}
+		if len(substitution.In) == 0 {
+			return fmt.Errorf("substitution %d requires at least one target surface", i)
+		}
+		seen := make(map[string]struct{}, len(substitution.In))
+		normalized := make([]string, 0, len(substitution.In))
+		for _, surface := range substitution.In {
+			surface = strings.ToLower(strings.TrimSpace(surface))
+			if _, ok := allowed[surface]; !ok {
+				return fmt.Errorf("substitution %d has unsupported target surface %q", i, surface)
+			}
+			if _, duplicate := seen[surface]; duplicate {
+				continue
+			}
+			seen[surface] = struct{}{}
+			pair := [2]string{substitution.Placeholder, surface}
+			if previous, duplicate := seenPairs[pair]; duplicate {
+				return fmt.Errorf("substitution %d duplicates placeholder %q on %s surface from substitution %d", i, substitution.Placeholder, surface, previous)
+			}
+			seenPairs[pair] = i
+			normalized = append(normalized, surface)
+		}
+		substitution.In = normalized
+	}
+	return nil
+}
+
+func (v *Store) applyCredentialMutations(credentials map[string]record, mutations *CredentialMutationSet, revision int64) error {
 	if mutations == nil {
 		return nil
 	}
@@ -664,7 +1087,7 @@ func applyCredentialMutations(credentials map[string]record, mutations *Credenti
 		delete(credentials, name)
 	}
 	for _, raw := range mutations.Replace {
-		rec, err := normalizeCredential(raw, revision)
+		rec, err := v.normalizeCredential(raw, revision)
 		if err != nil {
 			return err
 		}
@@ -679,7 +1102,7 @@ func applyCredentialMutations(credentials map[string]record, mutations *Credenti
 	}
 	addSeen := make(map[string]struct{})
 	for _, raw := range mutations.Add {
-		rec, err := normalizeCredential(raw, revision)
+		rec, err := v.normalizeCredential(raw, revision)
 		if err != nil {
 			return err
 		}
@@ -698,7 +1121,7 @@ func applyCredentialMutations(credentials map[string]record, mutations *Credenti
 	return nil
 }
 
-func applyBindingMutations(bindings map[string]Binding, mutations *BindingMutationSet) error {
+func (v *Store) applyBindingMutations(bindings map[string]Binding, mutations *BindingMutationSet) error {
 	if mutations == nil {
 		return nil
 	}
@@ -718,7 +1141,7 @@ func applyBindingMutations(bindings map[string]Binding, mutations *BindingMutati
 		delete(bindings, name)
 	}
 	for _, raw := range mutations.Replace {
-		b, err := normalizeBinding(raw)
+		b, err := v.normalizeBinding(raw)
 		if err != nil {
 			return err
 		}
@@ -733,7 +1156,7 @@ func applyBindingMutations(bindings map[string]Binding, mutations *BindingMutati
 	}
 	addSeen := make(map[string]struct{})
 	for _, raw := range mutations.Add {
-		b, err := normalizeBinding(raw)
+		b, err := v.normalizeBinding(raw)
 		if err != nil {
 			return err
 		}
@@ -763,7 +1186,7 @@ func cloneCredentialRecords(in map[string]record) map[string]record {
 func cloneCredentialBindings(in map[string]Binding) map[string]Binding {
 	out := make(map[string]Binding, len(in))
 	for k, v := range in {
-		out[k] = v
+		out[k] = cloneBinding(v)
 	}
 	return out
 }
@@ -822,36 +1245,9 @@ func explicitAllowCoversHost(pol *policy.NetworkPolicy, host string) bool {
 		return false
 	}
 	if strings.HasPrefix(host, "*.") {
-		return explicitAllowRuleMatches(pol, host) && pol.Evaluate("probe."+strings.TrimPrefix(host, "*.")) == policy.ActionAllow
+		return pol.Evaluate("probe."+strings.TrimPrefix(host, "*.")) == policy.ActionAllow
 	}
-	return explicitAllowRuleMatches(pol, host) && pol.Evaluate(host) == policy.ActionAllow
-}
-
-func explicitAllowRuleMatches(pol *policy.NetworkPolicy, host string) bool {
-	for _, r := range pol.Egress {
-		if r.Action != policy.ActionAllow {
-			continue
-		}
-		target := strings.ToLower(strings.TrimSuffix(strings.TrimSpace(r.Target), "."))
-		if target == host {
-			return true
-		}
-		if strings.HasPrefix(target, "*.") && hostMatchesPattern(host, target) {
-			return true
-		}
-	}
-	return false
-}
-
-func hostMatchesPattern(host, pattern string) bool {
-	host = strings.ToLower(strings.TrimSuffix(host, "."))
-	pattern = strings.ToLower(strings.TrimSuffix(pattern, "."))
-	if strings.HasPrefix(pattern, "*.") {
-		suffix := strings.TrimPrefix(pattern, "*")
-		apex := strings.TrimPrefix(pattern, "*.")
-		return strings.HasSuffix(host, suffix) && host != apex
-	}
-	return host == pattern
+	return pol.Evaluate(host) == policy.ActionAllow
 }
 
 func bindingHostMatchesIgnoreHosts(host string) bool {
@@ -975,7 +1371,6 @@ func validateBindingAmbiguity(bindings map[string]Binding) error {
 
 func bindingsAmbiguous(a, b Binding) bool {
 	if !stringSlicesOverlap(a.Match.Schemes, b.Match.Schemes) ||
-		!intSlicesOverlap(a.Match.Ports, b.Match.Ports) ||
 		!stringSlicesOverlap(a.Match.Methods, b.Match.Methods) ||
 		!pathPatternsOverlap(a.Match.Paths, b.Match.Paths) {
 		return false
@@ -1054,38 +1449,12 @@ func stringSlicesOverlap(a, b []string) bool {
 	return false
 }
 
-func intSlicesOverlap(a, b []int) bool {
-	set := make(map[int]struct{}, len(a))
-	for _, x := range a {
-		set[x] = struct{}{}
-	}
-	for _, y := range b {
-		if _, ok := set[y]; ok {
-			return true
-		}
-	}
-	return false
-}
-
 func canonicalHeaderName(name string) string {
 	return http.CanonicalHeaderKey(name)
 }
 
 func dedupeStringsInPlace(values *[]string) {
 	seen := make(map[string]struct{}, len(*values))
-	out := (*values)[:0]
-	for _, value := range *values {
-		if _, ok := seen[value]; ok {
-			continue
-		}
-		seen[value] = struct{}{}
-		out = append(out, value)
-	}
-	*values = out
-}
-
-func dedupeIntsInPlace(values *[]int) {
-	seen := make(map[int]struct{}, len(*values))
 	out := (*values)[:0]
 	for _, value := range *values {
 		if _, ok := seen[value]; ok {
@@ -1113,7 +1482,7 @@ func WriteError(w http.ResponseWriter, err error) {
 		http.Error(w, err.Error(), http.StatusNotFound)
 	case errors.Is(err, ErrExists):
 		http.Error(w, err.Error(), http.StatusConflict)
-	case strings.Contains(err.Error(), "expectedRevision"):
+	case errors.Is(err, ErrRevisionConflict):
 		http.Error(w, err.Error(), http.StatusConflict)
 	default:
 		http.Error(w, err.Error(), http.StatusBadRequest)

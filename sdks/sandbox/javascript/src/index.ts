@@ -1,4 +1,4 @@
-// Copyright 2026 Alibaba Group Holding Ltd.
+// Copyright 2026 The OpenSandbox Authors
 // 
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -20,16 +20,26 @@ export {
   SandboxInternalException,
   SandboxReadyTimeoutException,
   SandboxUnhealthyException,
+  SandboxWakeTimeoutException,
+  PoolAcquireFailedException,
+  PoolEmptyException,
+  PoolNotRunningException,
+  PoolStateStoreUnavailableException,
+  PoolDestroyedException,
+  PoolDestroyIncompleteException,
 } from "./core/exceptions.js";
 
 // Factory pattern (stable public interface; does NOT expose OpenAPI generated models).
 export type { AdapterFactory } from "./factory/adapterFactory.js";
+export type { DiagnosticContext, DiagnosticContent } from "./models/diagnostics.js";
+export type { Diagnostics } from "./services/diagnostics.js";
 export { DefaultAdapterFactory, createDefaultAdapterFactory } from "./factory/defaultAdapterFactory.js";
 
 export { ConnectionConfig } from "./config/connection.js";
 export type { ConnectionConfigOptions, ConnectionProtocol } from "./config/connection.js";
 
 export type {
+  AllocationSummary,
   Credential,
   CredentialAuth,
   CredentialAuthMetadata,
@@ -43,16 +53,24 @@ export type {
   CredentialMetadata,
   CredentialMutationSet,
   CredentialProxyConfig,
+  CredentialSubstitution,
+  CredentialSubstitutionSurface,
   CredentialVaultCreateRequest,
   CredentialVaultPatchRequest,
   CredentialVaultState,
   CreateSnapshotRequest,
+  CreateSandboxFromTemplateRequest,
   CreateSandboxRequest,
   CreateSandboxResponse,
   CustomHeaderEntry,
   Endpoint,
   Host,
+  ActivityProbe,
+  IdlePolicy,
+  RenewalPolicy,
+  ExchangeCredentialSource,
   InlineCredentialSource,
+  LifecycleHook,
   ListSnapshotsParams,
   ListSnapshotsResponse,
   ListSandboxesParams,
@@ -61,18 +79,33 @@ export type {
   NetworkRule,
   NetworkRuleAction,
   OSSFS,
+  PeriodicLifecycleHook,
   PlatformSpec,
   PVC,
   RenewSandboxExpirationRequest,
   RenewSandboxExpirationResponse,
   SnapshotInfo,
+  SnapshotMode,
   SnapshotState,
   SnapshotStatus,
   SandboxId,
   SandboxInfo,
+  SandboxLifecycle,
   SandboxMetadataPatch,
   Volume,
 } from "./models/sandboxes.js";
+export { SandboxOrigin } from "./models/sandboxes.js";
+
+export type {
+  CreateTemplateRequest,
+  ListTemplatesParams,
+  ListTemplatesResponse,
+  TemplateFormat,
+  TemplateInfo,
+  TemplatePhase,
+  TemplateReadiness,
+  TemplateStatus,
+} from "./models/templates.js";
 
 export type { Sandboxes } from "./services/sandboxes.js";
 export type { CredentialVault, Egress } from "./services/egress.js";
@@ -83,12 +116,15 @@ export type { SandboxFilter, SandboxManagerOptions } from "./manager.js";
 export type { ExecdHealth } from "./services/execdHealth.js";
 export type { ExecdMetrics } from "./services/execdMetrics.js";
 export type {
+  ByteRange,
   FileEntryType,
   FileInfo,
   FileMetadata,
   Permission,
   RenameFileItem,
   ReplaceFileContentItem,
+  ReadBytesResponse,
+  ReadBytesStream,
   SearchFilesResponse,
   FilesInfoResponse,
 } from "./models/filesystem.js";
@@ -131,9 +167,41 @@ export {
 
 export type {
   SandboxConnectOptions,
+  SandboxCreateFromTemplateOptions,
   SandboxCreateOptions,
 } from "./sandbox.js";
 export { Sandbox } from "./sandbox.js";
+
+export { SandboxPool } from "./pool.js";
+export { SandboxPoolManager } from "./poolManager.js";
+export type { SandboxPoolManagerOptions } from "./poolManager.js";
+export { InMemoryPoolStateStore } from "./poolStore.js";
+export {
+  AcquirePolicy,
+  PoolDestroyState,
+  PoolDestroyStrategy,
+  PoolLifecycleState,
+  PoolState,
+  PooledSandboxCreateReason,
+} from "./poolTypes.js";
+export type {
+  IdleEntry,
+  PoolCreationSpec,
+  PoolDestroyOptions,
+  PoolDestroyResult,
+  PoolHealthCheck,
+  PoolLogger,
+  PoolSandboxPreparer,
+  PoolSnapshot,
+  PoolStateStore,
+  PooledSandboxCreateContext,
+  PooledSandboxCreator,
+  ReapResult,
+  SandboxAcquireOptions,
+  SandboxPoolOptions,
+  StoreCounters,
+  TakeIdleResult,
+} from "./poolTypes.js";
 
 export type {
   ContentReplaceEntry,
@@ -145,3 +213,20 @@ export type {
   WriteEntry,
 } from "./models/filesystem.js";
 export type { SandboxFiles } from "./services/filesystem.js";
+export type { IsolationService, IsolationSession, RunOnceOpts } from "./services/isolatedSessions.js";
+export type {
+  CreateIsolatedSessionRequest,
+  IsolatedWorkspaceSpec,
+  IsolatedOverlaySpec,
+  EnvPassthroughSpec,
+  BindMount,
+  IsolatedSessionInfo,
+  IsolatedSessionState,
+  IsolatedRunOpts,
+  IsolatedBackgroundRun,
+  IsolatedRunStatus,
+  IsolatedRunLogs,
+  IsolatedCapabilities,
+  IsolatedSessionSummary,
+  ListIsolatedSessionsResponse,
+} from "./models/isolated.js";

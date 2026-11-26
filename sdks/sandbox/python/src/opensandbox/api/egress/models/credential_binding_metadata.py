@@ -1,5 +1,5 @@
 #
-# Copyright 2026 Alibaba Group Holding Ltd.
+# Copyright 2026 The OpenSandbox Authors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -38,7 +38,8 @@ class CredentialBindingMetadata:
         name (str):
         revision (int):
         match (CredentialMatch | Unset):
-        auth (CredentialAuthMetadata | Unset):
+        auth (CredentialAuthMetadata | Unset): Sanitized auth shape — `type` (plus `name` for `apiKey`) for static
+            kinds; `credential` only for the typeless exchange form.
     """
 
     name: str

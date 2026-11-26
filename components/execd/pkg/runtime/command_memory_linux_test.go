@@ -93,10 +93,12 @@ PYTHON
 `)
 	require.Equal(t, commandMemoryExitCode, *status.ExitCode)
 	require.NotNil(t, failure)
+	require.NotNil(t, failure.ExitCode)
+	require.Equal(t, commandMemoryExitCode, *failure.ExitCode)
 	require.Equal(t, []string{errCommandMemoryLimit.Error()}, failure.Traceback)
 
 	status, failure, output := executeCommand("printf 'same-execd\n'")
 	require.Equal(t, 0, *status.ExitCode)
 	require.Nil(t, failure)
-	require.Equal(t, "same-execd", output)
+	require.Equal(t, "same-execd\n", output)
 }
