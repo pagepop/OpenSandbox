@@ -96,6 +96,67 @@ def _merge_security_context(
     return merged
 
 
+_ANNOUNCE_POD_IPV4 = r"""
+import fcntl
+import ipaddress
+import json
+import os
+from pathlib import Path
+import socket
+import struct
+import time
+
+device = "eth0"
+pod_ip = ipaddress.IPv4Address(os.environ["ARP_REFRESH_POD_IP"])
+ifreq = struct.pack("256s", device.encode())
+with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as query:
+    address = fcntl.ioctl(query.fileno(), 0x8915, ifreq)[20:24]
+    hardware = fcntl.ioctl(query.fileno(), 0x8927, ifreq)[18:24]
+if pod_ip.packed != address or pod_ip.is_unspecified or hardware[0] & 1:
+    raise RuntimeError("Pod identity does not match the IPv4 Ethernet interface")
+caps = next(
+    row.split()[1] for row in Path("/proc/self/status").read_text().splitlines()
+    if row.startswith("CapEff:")
+)
+if int(caps, 16) != 1 << 13:
+    raise RuntimeError("ARP refresh init requires exactly NET_RAW")
+ethernet = b"\xff" * 6 + hardware + struct.pack("!H", 0x0806)
+arp = struct.pack("!HHBBH", 1, 0x0800, 6, 4, 1)
+frame = ethernet + arp + hardware + address + bytes(6) + address
+with socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(0x0806)) as sender:
+    sender.bind((device, 0))
+    sent_ns = time.time_ns()
+    if sender.send(frame) != len(frame):
+        raise RuntimeError("Pod ARP announcement did not send a complete frame")
+print(json.dumps({"phase": "own_arp_sent", "ip": str(pod_ip), "sent_ns": sent_ns}), flush=True)
+"""
+
+
+def _build_arp_refresh_init_container(image: str) -> Dict[str, Any]:
+    return {
+        "name": "refresh-pod-arp",
+        "image": image,
+        "imagePullPolicy": "IfNotPresent",
+        "command": ["python3", "-I", "-S", "-B", "-c", _ANNOUNCE_POD_IPV4],
+        "env": [
+            {
+                "name": "ARP_REFRESH_POD_IP",
+                "valueFrom": {"fieldRef": {"fieldPath": "status.podIP"}},
+            }
+        ],
+        "resources": {
+            "requests": {"cpu": "20m", "memory": "32Mi"},
+            "limits": {"cpu": "250m", "memory": "128Mi"},
+        },
+        "securityContext": {
+            "runAsUser": 0,
+            "allowPrivilegeEscalation": False,
+            "readOnlyRootFilesystem": True,
+            "capabilities": {"drop": ["ALL"], "add": ["NET_RAW"]},
+        },
+    }
+
+
 class BatchSandboxProvider(WorkloadProvider):
     def __init__(
         self,
@@ -110,6 +171,7 @@ class BatchSandboxProvider(WorkloadProvider):
         if template_file_path:
             logger.info(f"Using BatchSandbox template file: {template_file_path}")
         self.execd_init_resources = k8s_config.execd_init_resources if k8s_config else None
+        self.arp_refresh_init_image = k8s_config.arp_refresh_init_image if k8s_config else None
         self.image_pull_policy = k8s_config.image_pull_policy if k8s_config else "IfNotPresent"
         self.execd_run_as_init = bool(app_config and app_config.runtime.execd_run_as_init)
 
@@ -311,6 +373,14 @@ class BatchSandboxProvider(WorkloadProvider):
             batchsandbox, extra_volumes, extra_mounts, extra_security_context
         )
         merged_pod_spec = batchsandbox.get("spec", {}).get("template", {}).get("spec", {})
+        if (
+            self.arp_refresh_init_image
+            and not windows_profile
+            and not merged_pod_spec.get("hostNetwork")
+        ):
+            merged_pod_spec["initContainers"].append(
+                _build_arp_refresh_init_container(self.arp_refresh_init_image)
+            )
         ensure_egress_runtime_compatible(
             egress_settings.network_policy if egress_settings is not None else None,
             effective_runtime_class=merged_pod_spec.get("runtimeClassName"),

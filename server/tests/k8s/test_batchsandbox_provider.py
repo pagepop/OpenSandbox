@@ -19,6 +19,7 @@ from datetime import datetime, timezone
 from unittest.mock import MagicMock
 from fastapi import HTTPException
 from kubernetes.client import ApiException
+from pydantic import ValidationError
 
 from opensandbox_server.api.schema import (
     ImageSpec,
@@ -212,6 +213,69 @@ class TestBatchSandboxProvider:
             plural="batchsandboxes",
             label_selector="opensandbox.io/id=sbx-1",
         )
+
+    @pytest.mark.parametrize(
+        ("enabled", "host_network"),
+        [(False, False), (True, False), (True, True)],
+    )
+    def test_arp_refresh_init_uses_only_the_configured_image_and_privilege(
+        self, mock_k8s_client, tmp_path, enabled, host_network
+    ):
+        helper_image = "registry.example/sandbox-python@sha256:" + "a" * 64
+        template = tmp_path / "template.yaml"
+        template.write_text(
+            f"spec:\n  template:\n    spec:\n      hostNetwork: {str(host_network).lower()}\n"
+        )
+        config = AppConfig(
+            runtime=RuntimeConfig(type="kubernetes", execd_image="execd:test"),
+            kubernetes=KubernetesRuntimeConfig(
+                namespace="test-ns",
+                arp_refresh_init_image=helper_image if enabled else None,
+                batchsandbox_template_file=str(template),
+            ),
+        )
+        provider = BatchSandboxProvider(mock_k8s_client, config)
+        mock_k8s_client.create_custom_object.return_value = {
+            "metadata": {"name": "test-id", "uid": "test-uid"}
+        }
+        provider.create_workload(
+            sandbox_id="test-id",
+            namespace="test-ns",
+            image_spec=ImageSpec(uri="example/user-sandbox:latest"),
+            entrypoint=["/bin/bash"],
+            env={"ARP_REFRESH_POD_IP": "192.0.2.100"},
+            resource_limits={"memory": "1Gi"},
+            labels={},
+            expires_at=None,
+            execd_image="execd:test",
+        )
+
+        batch = mock_k8s_client.create_custom_object.call_args.kwargs["body"]
+        spec = batch["spec"]["template"]["spec"]
+        assert spec["containers"][0].get("securityContext") is None
+        init = spec["initContainers"]
+        expect_refresh = enabled and not host_network
+        expected_names = ["execd-installer"] + (["refresh-pod-arp"] if expect_refresh else [])
+        assert spec["hostNetwork"] is host_network
+        assert [item["name"] for item in init] == expected_names
+        if expect_refresh:
+            assert init[1]["image"] == helper_image
+            assert init[1]["securityContext"]["capabilities"] == {
+                "drop": ["ALL"],
+                "add": ["NET_RAW"],
+            }
+            assert init[1]["securityContext"]["allowPrivilegeEscalation"] is False
+            assert init[1]["env"] == [
+                {
+                    "name": "ARP_REFRESH_POD_IP",
+                    "valueFrom": {"fieldRef": {"fieldPath": "status.podIP"}},
+                }
+            ]
+
+    def test_arp_refresh_init_rejects_a_mutable_image_reference(self):
+        with pytest.raises(ValidationError, match="arp_refresh_init_image"):
+            KubernetesRuntimeConfig(arp_refresh_init_image="registry.example/sandbox-python:latest")
+
 
     def test_create_workload_builds_correct_manifest(self, mock_k8s_client):
         provider = BatchSandboxProvider(mock_k8s_client)
