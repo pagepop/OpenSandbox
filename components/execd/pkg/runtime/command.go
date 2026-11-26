@@ -204,6 +204,18 @@ func sameProcessGroups(uid uint32) bool {
 	return true
 }
 
+// Keep cgroup placement inside the managed launch so init-mode reaping and
+// the hardening launcher retain ownership of every command.
+func launchCommandWithMemoryBudget(cmd *exec.Cmd) (*managedProcess, *commandMemoryGroup, error) {
+	var group *commandMemoryGroup
+	process, err := launchManagedWith(cmd, func() error {
+		var err error
+		group, err = startCommandWithMemoryBudget(cmd)
+		return err
+	})
+	return process, group, err
+}
+
 // runCommand executes shell commands and streams their output.
 func (c *Controller) runCommand(ctx context.Context, request *ExecuteCodeRequest) error {
 	session := c.newCommandID(request)
@@ -258,7 +270,7 @@ func (c *Controller) runCommand(ctx context.Context, request *ExecuteCodeRequest
 		c.tailStdPipe(stderrPath, request.Hooks.OnExecuteStderr, done)
 	})
 
-	mp, err := launchManaged(cmd)
+	mp, memoryGroup, err := launchCommandWithMemoryBudget(cmd)
 	if err != nil {
 		close(done)
 		wg.Wait()
@@ -342,6 +354,10 @@ func (c *Controller) runCommand(ctx context.Context, request *ExecuteCodeRequest
 	<-done
 	<-watcherDone
 	wg.Wait()
+	memoryExceeded := memoryGroup.finish()
+	if memoryExceeded {
+		waitErr = errCommandMemoryLimit
+	}
 	if waitErr == nil {
 		c.markCommandFinished(session, 0, "")
 		request.Hooks.OnExecuteComplete(time.Since(startAt))
@@ -353,7 +369,12 @@ func (c *Controller) runCommand(ctx context.Context, request *ExecuteCodeRequest
 	var exitCodePtr *int
 
 	var exitCodeErr exitCoder
-	if errors.As(waitErr, &exitCodeErr) {
+	if memoryExceeded {
+		eName = "CommandExecError"
+		eValue = strconv.Itoa(commandMemoryExitCode)
+		eCode = commandMemoryExitCode
+		exitCodePtr = &eCode
+	} else if errors.As(waitErr, &exitCodeErr) {
 		exitCode := exitCodeErr.ExitCode()
 		eName = "CommandExecError"
 		eValue = strconv.Itoa(exitCode)
@@ -365,7 +386,7 @@ func (c *Controller) runCommand(ctx context.Context, request *ExecuteCodeRequest
 		eCode = 1
 	}
 	errorMessage := waitErr.Error()
-	if timedOut {
+	if timedOut && !memoryExceeded {
 		eName = "CommandTimeout"
 		errorMessage = fmt.Sprintf("command timed out after %s: %s", request.Timeout, errorMessage)
 	}
@@ -430,7 +451,7 @@ func (c *Controller) runBackgroundCommand(ctx context.Context, cancel context.Ca
 		defer devNull.Close()
 	}
 
-	mp, err := launchManaged(cmd)
+	mp, memoryGroup, err := launchCommandWithMemoryBudget(cmd)
 	kernel := &commandKernel{
 		pid:          -1,
 		stdoutPath:   stdoutPath,
@@ -465,6 +486,11 @@ func (c *Controller) runBackgroundCommand(ctx context.Context, cancel context.Ca
 		err = mp.Wait()
 		close(done)
 		cancel()
+		if memoryGroup.finish() {
+			log.ErrorWithCommandID(session, "command: run failed: %v", errCommandMemoryLimit)
+			c.markCommandFinished(session, commandMemoryExitCode, errCommandMemoryLimit.Error())
+			return
+		}
 		if err != nil {
 			log.ErrorWithCommandID(session, "command: run failed: %v", err)
 			exitCode := 1

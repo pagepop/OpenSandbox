@@ -231,6 +231,7 @@ export default withMermaid(defineConfig({
             { text: "Multi-Tenancy", link: "/guides/multi-tenancy" },
             { text: "Isolation Sessions", link: "/guides/isolation-sessions" },
             { text: "In-Sandbox Privilege Reduction", link: "/guides/privilege-reduction" },
+            { text: "Command Memory Limits", link: "/guides/command-memory-limits" },
             { text: "Pause & Resume", link: "/guides/pause-resume" },
             { text: "OCI Templates", link: "/guides/oci-templates" },
             {

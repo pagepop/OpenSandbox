@@ -70,6 +70,8 @@ Bash-session runs stream one merged `stdout` event stream (session stderr is mer
 
 Sessions use Bash when the image provides it and fall back to POSIX `sh` on minimal images — commands sent to a fallback session must be `sh`-compatible. Windows sandboxes are supported (environment names are case-insensitive; batch files require shell syntax).
 
+Opt-in Linux command memory budgets place each foreground or background `/command` execution and its descendants in a dedicated cgroup at launch. They preserve the managed-process reaper and hardening path, and classify a command as an OOM failure with exit code `137` only after confirming a cgroup OOM kill. See [Command Memory Limits](/guides/command-memory-limits) for runtime requirements and verification.
+
 ## Code execution
 
 Code contexts are persistent Jupyter kernels managed by execd. You execute code in a context and receive streamed results — standard output, execution results, and errors — across multiple calls that share state, exactly like a notebook.
