@@ -212,6 +212,18 @@ func sameProcessGroups(uid uint32) bool {
 	return true
 }
 
+// Keep cgroup placement inside the managed launch so init-mode reaping and
+// the hardening launcher retain ownership of every command.
+func launchCommandWithMemoryBudget(cmd *exec.Cmd) (*managedProcess, *commandMemoryGroup, error) {
+	var group *commandMemoryGroup
+	process, err := launchManagedWith(cmd, func() error {
+		var err error
+		group, err = startCommandWithMemoryBudget(cmd)
+		return err
+	})
+	return process, group, err
+}
+
 // runCommand executes shell commands and streams their output.
 func (c *Controller) runCommand(ctx context.Context, request *ExecuteCodeRequest) error {
 	session := c.newCommandID(request)
@@ -262,7 +274,7 @@ func (c *Controller) runCommand(ctx context.Context, request *ExecuteCodeRequest
 		c.tailStdPipe(stderrPath, request.Hooks.OnExecuteStderr, done)
 	})
 
-	mp, err := launchManaged(cmd)
+	mp, memoryGroup, err := launchCommandWithMemoryBudget(cmd)
 	if err != nil {
 		close(done)
 		wg.Wait()
@@ -334,30 +346,33 @@ func (c *Controller) runCommand(ctx context.Context, request *ExecuteCodeRequest
 	err = mp.Wait()
 	close(done)
 	wg.Wait()
+	memoryExceeded := memoryGroup.finish()
+	if memoryExceeded {
+		err = errCommandMemoryLimit
+	}
 	if err != nil {
-		var eName, eValue string
+		var eValue string
 		var eCode int
 		var exitCodePtr *int
-		var traceback []string
 
 		var exitCodeErr exitCoder
-		if errors.As(err, &exitCodeErr) {
+		if memoryExceeded {
+			eValue = strconv.Itoa(commandMemoryExitCode)
+			eCode = commandMemoryExitCode
+			exitCodePtr = &eCode
+		} else if errors.As(err, &exitCodeErr) {
 			exitCode := exitCodeErr.ExitCode()
-			eName = "CommandExecError"
 			eValue = strconv.Itoa(exitCode)
 			eCode = exitCode
 			exitCodePtr = &exitCode
 		} else {
-			eName = "CommandExecError"
 			eValue = err.Error()
 			eCode = 1
 		}
-		traceback = []string{err.Error()}
-
 		request.Hooks.OnExecuteError(&execute.ErrorOutput{
-			EName:     eName,
+			EName:     "CommandExecError",
 			EValue:    eValue,
-			Traceback: traceback,
+			Traceback: []string{err.Error()},
 			ExitCode:  exitCodePtr,
 		})
 
@@ -419,7 +434,7 @@ func (c *Controller) runBackgroundCommand(ctx context.Context, cancel context.Ca
 		defer devNull.Close()
 	}
 
-	mp, err := launchManaged(cmd)
+	mp, memoryGroup, err := launchCommandWithMemoryBudget(cmd)
 	kernel := &commandKernel{
 		pid:          -1,
 		stdoutPath:   stdoutPath,
@@ -454,6 +469,11 @@ func (c *Controller) runBackgroundCommand(ctx context.Context, cancel context.Ca
 		err = mp.Wait()
 		close(done)
 		cancel()
+		if memoryGroup.finish() {
+			log.ErrorWithCommandID(session, "command: run failed: %v", errCommandMemoryLimit)
+			c.markCommandFinished(session, commandMemoryExitCode, errCommandMemoryLimit.Error())
+			return
+		}
 		if err != nil {
 			log.ErrorWithCommandID(session, "command: run failed: %v", err)
 			exitCode := 1
