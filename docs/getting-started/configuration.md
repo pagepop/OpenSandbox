@@ -59,6 +59,8 @@ If `server.api_key` is empty, the server runs without authentication. In non-int
 | `[renew_intent]` | Auto-renew on access (experimental) |
 | `[agent_sandbox]` | Agent sandbox settings for Kubernetes |
 
+For IPv4 Linux sandboxes created from a BatchSandbox Pod template, set `[kubernetes].arp_refresh_init_image` to a trusted Python image pinned by SHA-256 digest. The optional init container announces its own Pod address after `execd-installer` finishes and before the application starts. It requires `NET_RAW` on the init container. Omit the setting to disable it.
+
 For the full configuration reference with all keys and defaults, see the [server configuration.md](https://github.com/opensandbox-group/OpenSandbox/blob/main/server/configuration.md).
 
 ## API Documentation
