@@ -225,6 +225,7 @@ class TestBatchSandboxProvider:
         template = tmp_path / "template.yaml"
         template.write_text(
             f"spec:\n  template:\n    spec:\n      hostNetwork: {str(host_network).lower()}\n"
+            "      securityContext:\n        runAsNonRoot: true\n"
         )
         config = AppConfig(
             runtime=RuntimeConfig(type="kubernetes", execd_image="execd:test"),
@@ -252,6 +253,7 @@ class TestBatchSandboxProvider:
 
         batch = mock_k8s_client.create_custom_object.call_args.kwargs["body"]
         spec = batch["spec"]["template"]["spec"]
+        assert spec["securityContext"]["runAsNonRoot"] is True
         assert spec["containers"][0].get("securityContext") is None
         init = spec["initContainers"]
         expect_refresh = enabled and not host_network
@@ -260,6 +262,7 @@ class TestBatchSandboxProvider:
         assert [item["name"] for item in init] == expected_names
         if expect_refresh:
             assert init[1]["image"] == helper_image
+            assert init[1]["securityContext"]["runAsNonRoot"] is False
             assert init[1]["securityContext"]["capabilities"] == {
                 "drop": ["ALL"],
                 "add": ["NET_RAW"],

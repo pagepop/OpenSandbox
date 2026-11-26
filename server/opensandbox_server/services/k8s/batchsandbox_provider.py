@@ -150,6 +150,7 @@ def _build_arp_refresh_init_container(image: str) -> Dict[str, Any]:
         },
         "securityContext": {
             "runAsUser": 0,
+            "runAsNonRoot": False,
             "allowPrivilegeEscalation": False,
             "readOnlyRootFilesystem": True,
             "capabilities": {"drop": ["ALL"], "add": ["NET_RAW"]},
