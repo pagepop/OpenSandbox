@@ -1262,33 +1262,6 @@ def test_mixed_list_never_hides_a_backend_failure(persisted_fsb, monkeypatch, fa
             assert not [i for i in listed_ids if i.startswith("fsb-")]
 
 
-@pytest.mark.parametrize(
-    ("discovery_status", "expected_status"),
-    [(404, 200), (403, 503), (None, 503)],
-    ids=["api-not-installed", "discovery-forbidden", "api-installed"],
-)
-def test_mixed_list_when_fsb_list_is_forbidden(
-    persisted_fsb, monkeypatch, discovery_status, expected_status
-):
-    client, _, fsb, sandbox_id = persisted_fsb
-    legacy = Mock(spec=KubernetesSandboxService)
-    legacy.list_sandbox_objects.return_value = [
-        fsb.get_sandbox(sandbox_id).model_copy(update={"id": "legacy"})
-    ]
-    api = fsb._cr_reader._client.get_custom_objects_api()
-    api.list_namespaced_custom_object.side_effect = ApiException(status=403)
-    if discovery_status is not None:
-        api.get_api_resources.side_effect = ApiException(status=discovery_status)
-    monkeypatch.setattr(lifecycle, "sandbox_service", CompositeSandboxService(legacy, fsb))
-
-    response = client.get("/v1/sandboxes")
-
-    assert response.status_code == expected_status
-    api.get_api_resources.assert_called_once_with("sandbox.fast.io", "v1alpha2")
-    if expected_status == 200:
-        assert [item["id"] for item in response.json()["items"]] == ["legacy"]
-
-
 @pytest.mark.asyncio
 async def test_mixed_create_keeps_legacy_semantics(persisted_fsb):
     _, _, fsb, _ = persisted_fsb

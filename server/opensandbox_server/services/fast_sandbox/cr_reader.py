@@ -65,18 +65,10 @@ class SandboxCRReader:
                 GROUP, VERSION, namespace, PLURAL, ignore_not_found=False
             )
         except ApiException as exc:
-            # Kubernetes can check authorization before determining whether
-            # the resource is installed. Confirm absence through discovery.
+            # An uninstalled CRD is an empty list, not a read failure; every
+            # other error surfaces as 503.
             if exc.status == 404:
                 return []
-            if exc.status == 403:
-                try:
-                    self._kubernetes().get_custom_objects_api().get_api_resources(GROUP, VERSION)
-                except ApiException as discovery_error:
-                    if discovery_error.status == 404:
-                        return []
-                except Exception as discovery_error:
-                    raise self._read_error(discovery_error) from discovery_error
             raise self._read_error(exc) from exc
         except Exception as exc:
             raise self._read_error(exc) from exc
